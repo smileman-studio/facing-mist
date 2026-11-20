@@ -1,0 +1,67 @@
+{
+    "$comment": "Модульная архитектура проекта facing-mist. Источники данных: asmdef-файлы в Assets/Scripts/<Module>/ и правила из AGENTS.md.",
+    "modules": [
+        {
+            "name": "SmilemanStudio.Core",
+            "path": "Assets/Scripts/Core",
+            "deps": [],
+            "forbidden": [
+                {
+                    "module": "SmilemanStudio.Simulation",
+                    "reason": "Core is the base layer and must not depend on upper layers"
+                },
+                {
+                    "module": "SmilemanStudio.Presentation",
+                    "reason": "Core is the base layer and must not depend on upper layers"
+                },
+                {
+                    "module": "SmilemanStudio.Bootstrap",
+                    "reason": "Core is the base layer and must not depend on upper layers"
+                }
+            ]
+        },
+        {
+            "name": "SmilemanStudio.Simulation",
+            "path": "Assets/Scripts/Simulation",
+            "deps": [
+                "SmilemanStudio.Core",
+                "Unity.Entities",
+                "Unity.Collections"
+            ],
+            "forbidden": [
+                {
+                    "module": "SmilemanStudio.Presentation",
+                    "reason": "Simulation must not know about rendering"
+                },
+                {
+                    "module": "SmilemanStudio.Bootstrap",
+                    "reason": "Bootstrap is the composition root and must not be referenced by simulation logic"
+                }
+            ]
+        },
+        {
+            "name": "SmilemanStudio.Presentation",
+            "path": "Assets/Scripts/Presentation",
+            "deps": [
+                "SmilemanStudio.Core",
+                "SmilemanStudio.Simulation"
+            ],
+            "forbidden": [
+                {
+                    "module": "SmilemanStudio.Bootstrap",
+                    "reason": "Bootstrap is the composition root and must not be referenced by presentation code"
+                }
+            ]
+        },
+        {
+            "name": "SmilemanStudio.Bootstrap",
+            "path": "Assets/Scripts/Bootstrap",
+            "deps": [
+                "SmilemanStudio.Core",
+                "SmilemanStudio.Simulation",
+                "SmilemanStudio.Presentation"
+            ],
+            "forbidden": []
+        }
+    ]
+}

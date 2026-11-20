@@ -1,0 +1,16 @@
+---
+name: project-rules
+description: "Load critical architecture rules before writing any code."
+---
+
+You are about to work on a Unity DOTS project. Before generating any code, strictly adhere to the following rules:
+
+1. **Read** the full context in `@AGENTS.md` for project overview, naming conventions, and paths.
+2. **Namespaces:** ALL code MUST start with `SmilemanStudio`. Namespaces MUST match the folder path (e.g., `Assets/Scripts/Simulation/` -> `SmilemanStudio.Simulation`).
+3. **Simulation Purity:** In `SmilemanStudio.Simulation`, using `UnityEngine.Random`, `UnityEngine.Time`, or `MonoBehaviour` is **FORBIDDEN**. Use `Unity.Mathematics.Random` and `SystemAPI.Time` instead.
+4. **Unity 6.6 DOTS Rules:** Systems MUST be `public partial struct` implementing `ISystem`. Never use `class` for systems.
+5. **ECS Data Modelling:** Split components by *access pattern*, not by object — decide the split at authoring/bootstrap time, never at runtime (runtime split is a structural change). See `AGENTS.md` -> `ECS DATA MODELLING`. Exception: the island anchor set is frozen by ADR-0001.
+6. **Determinism:** If you modify simulation logic, you must update the corresponding golden-hash test.
+7. **Verification:** After writing code, you MUST run the verification commands listed in `AGENTS.md` (Clean Logs -> Run Tests -> Read Results) and report the exact results.
+
+If you are unsure about an architectural boundary, ask the user instead of guessing.

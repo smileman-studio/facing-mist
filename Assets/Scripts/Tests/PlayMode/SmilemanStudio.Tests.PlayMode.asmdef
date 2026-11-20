@@ -1,0 +1,28 @@
+﻿{
+    "name": "SmilemanStudio.Tests.PlayMode",
+    "rootNamespace": "SmilemanStudio",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "Unity.Entities",
+        "Unity.Collections",
+        "Unity.Mathematics",
+        "SmilemanStudio.Core",
+        "SmilemanStudio.Simulation",
+        "SmilemanStudio.Bootstrap",
+        "SmilemanStudio.Presentation"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
