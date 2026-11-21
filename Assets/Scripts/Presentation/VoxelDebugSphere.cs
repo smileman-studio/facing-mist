@@ -129,6 +129,7 @@ namespace SmilemanStudio.Presentation
                             vertices[v] = new Vector3(p.x, p.y, p.z) * VOXEL_STEP;
                             
                             float3 n = meshOutput.Normals[v];
+                            // n = math.normalizesafe(vertices[v] + chunkGo.transform.localPosition);
                             normals[v] = new Vector3(n.x, n.y, n.z);
                             
                             if (UseVertexColors)

@@ -121,6 +121,75 @@ namespace SmilemanStudio.Core.Voxels
             if (sum == 0) return 32768;
             return (abs0 << 16) / sum;
         }
+        
+                /// <summary>
+        /// Узловой градиент: центральная разность плотности по кэшу (полу база = 1 шаг).
+        /// На краях apron (индекс 0 / CacheSize-1) — односторонняя разность (ADR-0002 D4).
+        /// Знак: от грунта (d&lt;0) к воздуху (d&gt;0).
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static int3 NodeGradient(NativeArray<short> density, int3 c)
+        {
+            int last = VoxelConstants.CacheSize - 1;
+            int x0 = c.x > 0 ? c.x - 1 : c.x;
+            int x1 = c.x < last ? c.x + 1 : c.x;
+            int y0 = c.y > 0 ? c.y - 1 : c.y;
+            int y1 = c.y < last ? c.y + 1 : c.y;
+            int z0 = c.z > 0 ? c.z - 1 : c.z;
+            int z1 = c.z < last ? c.z + 1 : c.z;
+            return new int3(
+                GetDensity(density, x1, c.y, c.z) - GetDensity(density, x0, c.y, c.z),
+                GetDensity(density, c.x, y1, c.z) - GetDensity(density, c.x, y0, c.z),
+                GetDensity(density, c.x, c.y, z1) - GetDensity(density, c.x, c.y, z0));
+        }
+
+        /// <summary>Линейная интерполяция int3 в Q16 (f ∈ [0, 65536]), long-арифметика, truncation.</summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static int3 LerpQ16(int3 a, int3 b, int f)
+        {
+            long inv = 65536 - f;
+            return new int3(
+                (int)(((long)a.x * inv + (long)b.x * f) >> 16),
+                (int)(((long)a.y * inv + (long)b.y * f) >> 16),
+                (int)(((long)a.z * inv + (long)b.z * f) >> 16));
+        }
+
+        /// <summary>
+        /// Трилинейная интерполяция 8 узловых градиентов весами Q16 (D4a).
+        /// Порядок свёртки фиксирован: x → y → z. Узлы — общие данные соседних ячеек
+        /// и чанков, поэтому поле непрерывно через границы ячеек и побитово совпадает
+        /// на стыках чанков одного LOD при одинаковых мировых узлах и весах.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static int3 TrilinearGradient(
+            int3 g000, int3 g100, int3 g010, int3 g110,
+            int3 g001, int3 g101, int3 g011, int3 g111,
+            int fx, int fy, int fz)
+        {
+            int3 a00 = LerpQ16(g000, g100, fx);
+            int3 a10 = LerpQ16(g010, g110, fx);
+            int3 a01 = LerpQ16(g001, g101, fx);
+            int3 a11 = LerpQ16(g011, g111, fx);
+            int3 b0 = LerpQ16(a00, a10, fy);
+            int3 b1 = LerpQ16(a01, a11, fy);
+            return LerpQ16(b0, b1, fz);
+        }
+
+        /// <summary>
+        /// Нормализация градиента для Presentation/тестов. Guard от normalize(0):
+        /// в регионах клампа градиент нулевой — нормаль вверх (ADR-0002 D4).
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static float3 NormalizeGradient(int3 g)
+        {
+            float3 n = new float3(g.x, g.y, g.z);
+            float lenSq = n.x * n.x + n.y * n.y + n.z * n.z;
+            if (lenSq > 0.0f)
+            {
+                return n / math.sqrt(lenSq);
+            }
+            return new float3(0f, 1f, 0f);
+        }
 
         /// <summary>
         /// Меширование одного чанка regular cells (LOD 0).
@@ -319,29 +388,29 @@ namespace SmilemanStudio.Core.Voxels
                                 const float Inv65536 = 1f / 65536f;
                                 float3 vertexPos = new float3(qfx * Inv65536, qfy * Inv65536, qfz * Inv65536);
 
-                                // 6. Нормаль: центральная разность по трём осям (полу база = 1 шаг,
-                                //    apron покрывает). Направлена от грунта (d<0) к воздуху (d>0).
-                                //    Grid-ячейка вершины = floor(Q16 >> 16) (позиции >= 0),
-                                //    кэш-координата = grid + 1 (apron = 1 воксель).
-                                int cvx = (int)(qfx >> 16) + 1;
-                                int cvy = (int)(qfy >> 16) + 1;
-                                int cvz = (int)(qfz >> 16) + 1;
-
-                                float nx = GetDensity(density, cvx + 1, cvy, cvz) - GetDensity(density, cvx - 1, cvy, cvz);
-                                float ny = GetDensity(density, cvx, cvy + 1, cvz) - GetDensity(density, cvx, cvy - 1, cvz);
-                                float nz = GetDensity(density, cvx, cvy, cvz + 1) - GetDensity(density, cvx, cvy, cvz - 1);
-
-                                float3 normal = new float3(nx, ny, nz);
-                                float lenSq = normal.x * normal.x + normal.y * normal.y + normal.z * normal.z;
-                                if (lenSq > 0.0f)
-                                {
-                                    normal /= math.sqrt(lenSq);
-                                }
-                                else
-                                {
-                                    // Degenerate: плоская поверхность без градиента — вверх.
-                                    normal = new float3(0f, 1f, 0f);
-                                }
+                                // 6. Нормаль (D4a): трилинейная интерполяция узловых градиентов
+                                //    в суб-воксельной позиции вершины. Floor-снэп по ячейке удалён:
+                                //    он давал piecewise-constant нормали (площадки 0.5 м на терминаторе).
+                                //    Узловые градиенты общие у соседних ячеек/чанков (apron из того же
+                                //    SDF) -> непрерывность через границы и побитовые стыки чанков.
+                                int gx0 = (int)(qfx >> 16);
+                                int gy0 = (int)(qfy >> 16);
+                                int gz0 = (int)(qfz >> 16);
+                                int fx = (int)(qfx & 0xFFFF);
+                                int fy = (int)(qfy & 0xFFFF);
+                                int fz = (int)(qfz & 0xFFFF);
+                                int3 c000 = new int3(gx0, gy0, gz0) + 1;
+                                int3 gI = TrilinearGradient(
+                                    NodeGradient(density, c000),
+                                    NodeGradient(density, c000 + new int3(1, 0, 0)),
+                                    NodeGradient(density, c000 + new int3(0, 1, 0)),
+                                    NodeGradient(density, c000 + new int3(1, 1, 0)),
+                                    NodeGradient(density, c000 + new int3(0, 0, 1)),
+                                    NodeGradient(density, c000 + new int3(1, 0, 1)),
+                                    NodeGradient(density, c000 + new int3(0, 1, 1)),
+                                    NodeGradient(density, c000 + new int3(1, 1, 1)),
+                                    fx, fy, fz);
+                                float3 normal = NormalizeGradient(gI);
 
                                 // 7. Материал: в grid-ячейке вершины (chunk-local, без
                                 //    apron-оффсета). Материал ищется в поле по крупным
