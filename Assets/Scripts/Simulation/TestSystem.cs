@@ -14,7 +14,7 @@ namespace SmilemanStudio.Simulation
             // Используем время симуляции (SystemAPI.Time), а не UnityEngine.Time —
             // согласно правилам Game.Sim.* (SystemState.Time устарело).
             double elapsedTime = SystemAPI.Time.ElapsedTime;
-            Debug.Log($"[TestSystem] ElapsedTime: {elapsedTime:F4}s");
+            // Debug.Log($"[TestSystem] ElapsedTime: {elapsedTime:F4}s");
         }
     }
 }

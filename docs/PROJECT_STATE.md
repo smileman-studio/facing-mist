@@ -98,7 +98,17 @@
 - Таблицы Laine–Krahenbuhl (GDC 2006) перенесены из `transvoxel_core/` в Burst-safe flat arrays.
 - Алгоритм: case code (8 бит) → `RegularCellClass` → lookup геометрии → интерполяция Q16 → vertex cache (2 dock-а 16×16×4 int, swap по слоям y).
 - Vertex cache: сброс слота 0 ДО `continue`; угловые вершины (`cacheIdx == 0`) пишутся в выбранный dock; интерполированные (`cornerIdx1 == 7`) пишутся в `currentCache[x*16*4 + z*4 + cacheIdx]` (эталон transvoxel_core строки 239-242).
-- Нормали: центральная разность плотности по 19³ кэшу (полу база = 1 шаг).
+- Нормали: центральная разность плотности по 19³ кэшу (полу база = 1 шаг), направлены наружу (от грунта к воздуху).
+- **Winding fix (2026-11-21):** `MeshInto` разворачивает обход таблиц на (ia, ic, ib) —
+  таблицы Laine–Krahenbuhl дают обход, согласованный с inward-нормалями эталона
+  transvoxel_core, а P4a считает нормали наружу. Без разворота треугольники были
+  вывернуты относительно нормалей (backface culling показывал сферу наизнанку).
+  Transition-мешер (P4b) разворачивал аналогично, теперь regular и transition
+  согласованы между собой. Контракт зафиксирован в XML-doc `TransvoxelMeshOutput`
+  и тестами: `Mesh_Sphere_CrossProductNormal_MatchesVertexNormal` (dot(cross,
+  vertexNormal) > 0.5 на каждом невырожденном треугольнике сферы) и знак
+  знакового объёма в `Mesh_Sphere_ClosedSurface_VolumeAndFlux`. Таблицы не
+  менялись — golden hashes валидны.
 - Материалы: `IslandMaterialField.At` в grid-ячейке вершины.
 - Golden hashes (FNV-1a 64): `RegularCornerOffset 0x229B64048EA9BCC5`, `RegularCellClass 0xEFFBF2112A9922D7`, `RegularCellGeometryCounts 0x132487C81C138B5D`, `RegularCellTriangleIndices 0xD656F9622A6EECE0`, `RegularVertexDataFlat 0x25A2E854318F80CD`.
 

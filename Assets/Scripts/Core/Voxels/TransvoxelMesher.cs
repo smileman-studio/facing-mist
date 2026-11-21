@@ -8,9 +8,11 @@ namespace SmilemanStudio.Core.Voxels
     /// </summary>
     /// <remarks>
     /// Позиции и нормали — в шагах сетки LOD0 (полуметрах) как <c>float3</c>.
-    /// Индексы — <c>uint</c> (3 на треугольник). Материалы — <c>byte</c>
-    /// (<see cref="VoxelMaterial"/>). Порядок вершин совпадает с порядком
-    /// добавления в <see cref="Positions"/>.
+    /// Индексы — <c>uint</c> (3 на треугольник). Обход треугольников (CCW в
+    /// левой системе координат Unity) согласован с нормалями вершин: нормаль,
+    /// вычисленная как <c>cross(p1-p0, p2-p0)</c>, смотрит в ту же сторону,
+    /// что и вершинные нормали (наружу, от грунта к воздуху). Порядок вершин
+    /// совпадает с порядком добавления в <see cref="Positions"/>.
     /// </remarks>
     public struct TransvoxelMeshOutput
     {
@@ -376,13 +378,23 @@ namespace SmilemanStudio.Core.Voxels
                             vertexIndices[i] = vertexIndex;
                         }
 
-                        // 8. Треугольники: triCount * 3 индекса из плоского массива.
-                        int triVertCount = triCount * 3;
-                        for (int i = 0; i < triVertCount; i++)
-                        {
-                            int cellVertexIdx = TransvoxelTables.RegularCellTriangleIndices[triBase + i];
-                            indices.Add((uint)vertexIndices[cellVertexIdx]);
-                        }
+                    // 8. Треугольники: triCount * 3 индекса из плоского массива.
+                    // Обход развёрнут (ia, ic, ib) относительно таблиц Laine–Krahenbuhl:
+                    // таблицы дают обход, согласованный с inward-нормалями эталона
+                    // transvoxel_core; P4a считает нормали наружу (градиент от грунта
+                    // к воздуху), поэтому winding переворачивается здесь.
+                    // Transition-мешер (P4b) разворачивает аналогично:
+                    // flipWinding=false → (i+2, i+1, i).
+                    int triVertCount = triCount * 3;
+                    for (int i = 0; i < triVertCount; i += 3)
+                    {
+                        int ia = vertexIndices[TransvoxelTables.RegularCellTriangleIndices[triBase + i + 0]];
+                        int ib = vertexIndices[TransvoxelTables.RegularCellTriangleIndices[triBase + i + 1]];
+                        int ic = vertexIndices[TransvoxelTables.RegularCellTriangleIndices[triBase + i + 2]];
+                        indices.Add((uint)ia);
+                        indices.Add((uint)ic);
+                        indices.Add((uint)ib);
+                    }
                     }
                 }
 

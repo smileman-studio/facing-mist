@@ -451,12 +451,58 @@ namespace SmilemanStudio.Tests.EditMode
                 fluxY += cross.y;
                 fluxZ += cross.z;
             }
+            // Знак: при outward-winding (согласован с нормалями наружу) знаковый
+            // объём положитель. Отрицательный знак = winding перевёрнут (регрессия
+            // фикса P4a 2026-11-21).
+            Assert.Greater(vol, 0.0, "signed volume must be positive: outward (CCW) winding");
             vol = Math.Abs(vol) / 6.0;
             const double SphereVolume = 374.66; // 4/3 π (√20)³
             Assert.AreEqual(SphereVolume, vol, SphereVolume * 0.10, "volume must be ~4/3 π r³ (r = √20), inscribed polyhedron");
             Assert.Less(Math.Abs(fluxX), 1e-3, "closed surface: flux must be 0 (X)");
             Assert.Less(Math.Abs(fluxY), 1e-3, "closed surface: flux must be 0 (Y)");
             Assert.Less(Math.Abs(fluxZ), 1e-3, "closed surface: flux must be 0 (Z)");
+            o.Dispose(); d.Dispose();
+        }
+
+        [Test]
+        public void Mesh_Sphere_CrossProductNormal_MatchesVertexNormal()
+        {
+            // Winding-контракт P4a (фикс 2026-11-21): обход треугольников обязан
+            // быть согласован с вершинными нормалями. Нормаль эталонных таблиц
+            // Laine–Krahenbuhl смотрит внутрь грунта, а P4a считает нормали
+            // наружу (градиент от d<0 к d>0), поэтому MeshInto разворачивает
+            // обход (ia, ic, ib). Тест ловит регрессию: dot(cross, vertexNormal) > 0
+            // для каждого невырожденного треугольника замкнутой сферы.
+            var d = Sphere(out var o);
+            Assert.Greater(o.TriangleCount, 0);
+            int checkedTris = 0;
+            for (int t = 0; t < o.TriangleCount; t++)
+            {
+                int i0 = (int)o.Indices[t * 3 + 0];
+                int i1 = (int)o.Indices[t * 3 + 1];
+                int i2 = (int)o.Indices[t * 3 + 2];
+                float3 p0 = o.Positions[i0];
+                float3 p1 = o.Positions[i1];
+                float3 p2 = o.Positions[i2];
+                float3 cross = math.cross(p1 - p0, p2 - p0);
+                float crossLenSq = math.lengthsq(cross);
+                if (crossLenSq < 1e-12f)
+                    continue; // дегенерат (нулевая площадь) — winding не определить
+
+                // Средняя вершинная нормаль треугольника; для выпуклой сферы без
+                // швов она не вырождена.
+                float3 avg = o.Normals[i0] + o.Normals[i1] + o.Normals[i2];
+                float avgLenSq = math.lengthsq(avg);
+                if (avgLenSq < 1e-12f)
+                    continue;
+
+                float cos = math.dot(cross, avg) / (math.sqrt(crossLenSq) * math.sqrt(avgLenSq));
+                Assert.Greater(cos, 0.5f,
+                    $"triangle {t}: winding disagrees with vertex normals (cos={cos:F3}); " +
+                    "expected outward-consistent (CCW) order");
+                checkedTris++;
+            }
+            Assert.Greater(checkedTris, 100, "test must cover a meaningful number of triangles");
             o.Dispose(); d.Dispose();
         }
 
