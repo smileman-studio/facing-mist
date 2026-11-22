@@ -3,7 +3,8 @@
     "rootNamespace": "SmilemanStudio",
     "references": [
         "SmilemanStudio.Core",
-        "SmilemanStudio.Simulation"
+        "SmilemanStudio.Simulation",
+        "Unity.Collections"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

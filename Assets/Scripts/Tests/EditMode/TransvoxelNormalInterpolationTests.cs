@@ -81,40 +81,85 @@ namespace SmilemanStudio.Tests.EditMode
         }
 
         // --- 3. LOD-граница: transition-грань vs мелкий regular-сосед, побитово ---
+        // Фикстура: оба кэша из ОДНОГО поля — IslandSdf через VoxelChunkSampler.
+        // MeshTransitionInto берёт узлы плоскости шва из генератора (IslandSdf.SdfVoxel):
+        // в coarse-кэше только чётные воксели мира, нечётные сэмплы шва существуют лишь
+        // в генераторе. Аналитическая сфера в fine-кэше была бы ДРУГИМ полем плотности,
+        // и побитовое совпадение невозможно ни при какой реализации; в проде обе стороны
+        // сэмплят IslandSdf, поэтому контракт D4a проверяется именно на нём.
+        // Утверждение (bitwise) не ослаблено — заменён только источник плотности.
         [Test]
         public void Seam_TransitionFace_MatchesFineRegular_NormalsBitwise()
         {
             var id = new IslandId(1);
-            float3 center = new float3(0f, 16f, 16f);
-            const float r = 12f;
-            int3 origin0 = int3.zero;
-            using var dCoarse = SphereCache(origin0, 2, center, r);
-            int3 originG = new int3(-16, 0, 0);
-            using var dFine = SphereCache(originG, 1, center, r);
-            var fine = TransvoxelMesher.Mesh(dFine, id, Allocator.Persistent);
+            const int radius = 200;
+            const int lod = 1;
+            int shift = 4 + lod;
 
-            var pos = new NativeList<float3>(64, Allocator.Persistent);
-            var grad = new NativeList<int3>(64, Allocator.Persistent);
-            var mat = new NativeList<byte>(64, Allocator.Persistent);
-            var idx = new NativeList<uint>(96, Allocator.Persistent);
-            TransvoxelTransitionMesher.MeshTransitionInto(dCoarse, id, 200, origin0, TransitionDirection.XMin, 1, pos, grad, mat, idx);
+            // Точка поверхности: смена знака вдоль -Y (тот же проб, что в MeshTransition_*).
+            bool found = false;
+            int3 surf = int3.zero;
+            int[] probes = { 8, 24, 40, -16, -32 };
+            foreach (int px in probes)
+            foreach (int pz in probes)
+            {
+                int prev = IslandSdf.SdfVoxel(new int3(px, 128, pz), id, radius);
+                for (int y = 128; y >= -600; y -= 4)
+                {
+                    int cur = IslandSdf.SdfVoxel(new int3(px, y, pz), id, radius);
+                    if ((cur < 0) != (prev < 0))
+                    {
+                        surf = new int3(px, y, pz);
+                        found = true;
+                        break;
+                    }
+                    prev = cur;
+                }
+                if (found) break;
+            }
+            Assert.IsTrue(found, "surface point not found");
+
+            int3 base0 = new int3((surf.x >> shift) << shift, (surf.y >> shift) << shift, (surf.z >> shift) << shift);
+            int3[] offsets =
+            {
+                new int3(0, 0, 0),   new int3(0, -32, 0), new int3(0, 0, -32), new int3(0, -32, -32),
+                new int3(32, 0, 0),  new int3(-32, 0, 0), new int3(0, 32, 0),  new int3(0, 0, 32),
+            };
 
             int matched = 0;
-            for (int i = 0; i < pos.Length; i++)
+            foreach (int3 off in offsets)
             {
-                float3 world = origin0 + pos[i] * 2f;
-                if (math.abs(world.x - origin0.x) > 1e-3f) continue; // только грань стыка
-                for (int j = 0; j < fine.VertexCount; j++)
+                int3 origin0 = base0 + off;
+                long keyC = VoxelChunkCoord.Pack(origin0.x >> shift, origin0.y >> shift, origin0.z >> shift, lod);
+                using var dCoarse = VoxelChunkSampler.Sample(keyC, id, radius, Allocator.Persistent);
+                int3 originG = origin0 - new int3(16, 0, 0);
+                long keyG = VoxelChunkCoord.Pack(originG.x >> 4, originG.y >> 4, originG.z >> 4, 0);
+                using var dFine = VoxelChunkSampler.Sample(keyG, id, radius, Allocator.Persistent);
+                var fine = TransvoxelMesher.Mesh(dFine, id, Allocator.Persistent);
+
+                var pos = new NativeList<float3>(64, Allocator.Persistent);
+                var grad = new NativeList<int3>(64, Allocator.Persistent);
+                var mat = new NativeList<byte>(64, Allocator.Persistent);
+                var idx = new NativeList<uint>(96, Allocator.Persistent);
+                TransvoxelTransitionMesher.MeshTransitionInto(dCoarse, id, radius, origin0, TransitionDirection.XMin, lod, pos, grad, mat, idx);
+
+                for (int i = 0; i < pos.Length; i++)
                 {
-                    float3 wf = originG + fine.Positions[j];
-                    if (math.distance(world, wf) > 1e-3f) continue;
-                    float3 nT = TransvoxelMesher.NormalizeGradient(grad[i]);
-                    Assert.AreEqual(nT, fine.Normals[j], $"LOD seam vertex {i}/{j}: normals must be bitwise equal");
-                    matched++;
+                    float3 world = origin0 + pos[i] * 2f;
+                    if (math.abs(world.x - origin0.x) > 1e-3f) continue; // только грань стыка
+                    for (int j = 0; j < fine.VertexCount; j++)
+                    {
+                        float3 wf = originG + fine.Positions[j];
+                        if (math.distance(world, wf) > 1e-3f) continue;
+                        float3 nT = TransvoxelMesher.NormalizeGradient(grad[i]);
+                        Assert.AreEqual(nT, fine.Normals[j], $"LOD seam vertex {i}/{j} at {world}: normals must be bitwise equal");
+                        matched++;
+                    }
                 }
+                pos.Dispose(); grad.Dispose(); mat.Dispose(); idx.Dispose(); fine.Dispose();
+                if (matched > 0) break;
             }
             Assert.Greater(matched, 0, "surface must cross the LOD seam face");
-            pos.Dispose(); grad.Dispose(); mat.Dispose(); idx.Dispose(); fine.Dispose();
         }
 
         // --- 4. Low-res грань полосы vs own regular coarse-чанка, побитово ---
