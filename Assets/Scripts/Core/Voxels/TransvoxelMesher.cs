@@ -42,8 +42,11 @@ namespace SmilemanStudio.Core.Voxels
     /// </summary>
     /// <remarks>
     /// Вход — кэш плотности 19³ <c>short</c> (XYZ-мажорный: индекс
-    /// <c>(x * CacheSize + y) * CacheSize + z</c>), <see cref="IslandId"/>.
+    /// <c>(x * CacheSize + y) * CacheSize + z</c>) и <c>nodeMaterial</c> 17³ <c>byte</c>.
     /// Выход — <see cref="TransvoxelMeshOutput"/>: позиции, нормали, индексы, материалы.
+    ///
+    /// Метод — чистая функция входных буферов. Ни <see cref="IslandSdf"/>,
+    /// ни <see cref="IslandMaterialField"/> не вызываются.
     ///
     /// Алгоритм (P4a, regular cells, LOD 0):
     ///   1. Для каждой из 16³ ячеек чанка читаем 8 углов из кэша.
@@ -57,15 +60,15 @@ namespace SmilemanStudio.Core.Voxels
     ///      фиксированная точка Q16 (1/65536 шага сетки).
     ///   6. Нормаль — центральная разность плотности по трём осям (полу база = 1 шаг),
     ///      направлена от грунта к воздуху (наружу).
-    ///   7. Материал — <see cref="IslandMaterialField.At"/> в целочисленной позиции вершины.
+    ///   7. Материал — <c>nodeMaterial</c> в grid-ячейке вершины (chunk-local, 0..16).
     ///
     /// Vertex cache (как в оригинале): две плоскости 16×16×4, по одной на слой y.
     /// Кэшируемая вершина (ребро на грани ячейки) пишется в dock, выбранный битом 2
     /// edge code: бит 2 = 0 → current, бит 2 = 1 → previous. При обходе y-слоя текущий
     /// слой уже обработан, поэтому вершины с битом 2 = 0 читаются/пишутся в current,
-    /// а с битом 2 = 1 — в previous (слой y−1). После каждого слоя dock-и меняются местами.
+    /// а с битом 2 = 1 — в previous (слой y−1). После каждого слоя dock-и меняются местам.
     ///
-    /// Детерминизм: чистая функция от (кэш, IslandId). Все вычисления
+    /// Детерминизм: чистая функция от (density, nodeMaterial). Все вычисления
     /// целочисленные или float-линейные (без трансцендентных), поэтому результат
     /// побитово одинаков на всех платформах и в Burst.
     /// </remarks>
@@ -83,6 +86,43 @@ namespace SmilemanStudio.Core.Voxels
 
         /// <summary>Число слоёв vertex cache (по z внутри слоя).</summary>
         private const int CacheSlots = 4;
+
+        // --- Пропуск приграничных слоёв ячеек (LOD-шов, ADR-0002 D7) ---
+        //
+        // Transition cells заменяют приграничный слой regular-ячеек coarse-чанка
+        // (полоса глубиной ровно 1 coarse-ячейка), а не дополняют его: если слой
+        // мешировать и regular, и transition, в переходной зоне возникают две
+        // наложенные стенки (z-fighting, выступы, обратные нормали изнутри).
+        // Вызывающий передаёт маску граней, на которых regular-слой пропущен,
+        // и сам меширует transition на тех же гранях.
+        // Биты соответствуют TransitionDirection: бит = 1 << ((int)dir - 1).
+
+        /// <summary>Пропустить слой ячеек x = 0 (грань <see cref="TransitionDirection.XMin"/>).</summary>
+        public const int SkipXMin = 1 << 0;
+
+        /// <summary>Пропустить слой ячеек y = 0 (грань <see cref="TransitionDirection.YMin"/>).</summary>
+        public const int SkipYMin = 1 << 1;
+
+        /// <summary>Пропустить слой ячеек z = 0 (грань <see cref="TransitionDirection.ZMin"/>).</summary>
+        public const int SkipZMin = 1 << 2;
+
+        /// <summary>Пропустить слой ячеек x = CellsPerAxis-1 (грань <see cref="TransitionDirection.XMax"/>).</summary>
+        public const int SkipXMax = 1 << 3;
+
+        /// <summary>Пропустить слой ячеек y = CellsPerAxis-1 (грань <see cref="TransitionDirection.YMax"/>).</summary>
+        public const int SkipYMax = 1 << 4;
+
+        /// <summary>Пропустить слой ячеек z = CellsPerAxis-1 (грань <see cref="TransitionDirection.ZMax"/>).</summary>
+        public const int SkipZMax = 1 << 5;
+
+        /// <summary>
+        /// Бит маски пропуска для грани: соответствие <see cref="TransitionDirection"/>
+        /// (XMin=1 → бит 0 … ZMax=6 → бит 5).
+        /// </summary>
+        public static int SkipFaceBit(TransitionDirection dir)
+        {
+            return 1 << ((int)dir - 1);
+        }
 
         /// <summary>
         /// Сэмпл плотности из кэша 19³ (XYZ-мажорный).
@@ -198,7 +238,9 @@ namespace SmilemanStudio.Core.Voxels
         /// Кэш плотности 19³ <c>short</c>, XYZ-мажорный. Длина ровно
         /// <see cref="CacheVolume"/>.
         /// </param>
-        /// <param name="islandId">Идентификатор острова (для материала).</param>
+        /// <param name="nodeMaterial">
+        /// Материал узлов сетки: 17³ <c>byte</c>, XYZ-мажорный.
+        /// </param>
         /// <param name="allocator">Аллокатор выходных буферов.</param>
         /// <returns>
         /// Заполненный <see cref="TransvoxelMeshOutput"/>. Вызывающий обязан
@@ -206,15 +248,34 @@ namespace SmilemanStudio.Core.Voxels
         /// </returns>
         public static TransvoxelMeshOutput Mesh(
             NativeArray<short> density,
-            IslandId islandId,
+            NativeArray<byte> nodeMaterial,
             Allocator allocator)
+        {
+            return Mesh(density, nodeMaterial, allocator, 0);
+        }
+
+        /// <summary>
+        /// Меширование одного чанка regular cells с маской пропускаемых граней.
+        /// </summary>
+        /// <param name="faceMask">
+        /// Битовая маска (<see cref="SkipXMin"/> … <see cref="SkipZMax"/>,
+        /// см. <see cref="SkipFaceBit"/>): на установленных гранях приграничный
+        /// слой ячеек regular-меша пропускается — его заменяют transition cells,
+        /// которые меширует вызывающий. 0 — мешировать весь чанк (поведение
+        /// до появления LOD-шва).
+        /// </param>
+        public static TransvoxelMeshOutput Mesh(
+            NativeArray<short> density,
+            NativeArray<byte> nodeMaterial,
+            Allocator allocator,
+            int faceMask)
         {
             var positions = new NativeList<float3>(64, allocator);
             var normals = new NativeList<float3>(64, allocator);
             var materials = new NativeList<byte>(64, allocator);
             var indices = new NativeList<uint>(96, allocator);
 
-            MeshInto(density, islandId, positions, normals, materials, indices);
+            MeshInto(density, nodeMaterial, positions, normals, materials, indices, faceMask);
 
             // Финальные буферы ровно по фактическим длинам (NativeList.ToArray копирует).
             var output = new TransvoxelMeshOutput
@@ -233,24 +294,48 @@ namespace SmilemanStudio.Core.Voxels
         }
 
         /// <summary>
-        /// Меширование regular cells в готовые growable-выходы (P4a, ADR-0002 D7).
+        /// Меширование regular cells в готовые growable-выходы (P4a/P5).
         /// </summary>
         /// <remarks>
-        /// Списки на входе обязаны быть пустыми; заполняются append-ом, их буферы —
-        /// ответственность вызывающего. Служебные scratch-буферы живут на Allocator.Temp
-        /// (освобождаются автоматически). Метод — чистая функция: без throw, без
-        /// managed-аллокаций, только прямое обращение к static readonly таблицам,
-        /// поэтому пригоден для вызова из Burst-джобы (паттерн NativeList-полей).
-        /// Контракт: density.Length == CacheVolume (проверка длины — снаружи: Burst
-        /// компилирует весь граф вызовов job-ы, throw внутри Burst недоступен).
+        /// Списки на входе обязаны быть пустыми или содержать предыдущий результат
+        /// (append-режим, индексы продолжатся с positions.Length).
+        /// <para/>
+        /// Метод — чистая функция входов: без throw, без managed-аллокаций, только
+        /// прямое обращение к static readonly таблицам (Burst-safe).
         /// </remarks>
         public static void MeshInto(
             NativeArray<short> density,
-            IslandId islandId,
+            NativeArray<byte> nodeMaterial,
             NativeList<float3> positions,
             NativeList<float3> normals,
             NativeList<byte> materials,
             NativeList<uint> indices)
+        {
+            MeshInto(density, nodeMaterial, positions, normals, materials, indices, 0);
+        }
+
+        /// <summary>
+        /// Меширование regular cells с маской пропускаемых граней (LOD-шов).
+        /// </summary>
+        /// <param name="faceMask">
+        /// Битовая маска <see cref="SkipXMin"/> … <see cref="SkipZMax"/>
+        /// (<see cref="SkipFaceBit"/>): приграничный слой ячеек на установленных
+        /// гранях не мешируется — его заменяют transition cells вызывающего.
+        /// </param>
+        /// <remarks>
+        /// Пропущенная ячейка обязана сбросить ВСЕ слоты vertex cache своей
+        /// позиции (x, z) в current-dock: соседние ячейки читают слоты 1-3,
+        /// а оставшееся значение — индекс вершины предыдущего y-слоя (dock
+        /// переживает swap), что дало бы треугольник к чужой вершине.
+        /// </remarks>
+        public static void MeshInto(
+            NativeArray<short> density,
+            NativeArray<byte> nodeMaterial,
+            NativeList<float3> positions,
+            NativeList<float3> normals,
+            NativeList<byte> materials,
+            NativeList<uint> indices,
+            int faceMask)
         {
             // Vertex cache: два dock-а по 16*16*4 int, инициализированы -1.
             int cacheSize = CellsPerAxis * CellsPerAxis * CacheSlots;
@@ -272,6 +357,27 @@ namespace SmilemanStudio.Core.Voxels
                 {
                     for (int x = 0; x < CellsPerAxis; x++)
                     {
+                        // 0. Пропуск приграничного слоя (LOD-шов): слой заменяется
+                        //    transition cells вызывающего. Сбрасываем все 4 слота
+                        //    dock позиции (x, z) — см. remarks.
+                        bool skipLayer =
+                            (x == 0 && (faceMask & SkipXMin) != 0) ||
+                            (x == CellsPerAxis - 1 && (faceMask & SkipXMax) != 0) ||
+                            (y == 0 && (faceMask & SkipYMin) != 0) ||
+                            (y == CellsPerAxis - 1 && (faceMask & SkipYMax) != 0) ||
+                            (z == 0 && (faceMask & SkipZMin) != 0) ||
+                            (z == CellsPerAxis - 1 && (faceMask & SkipZMax) != 0);
+
+                        if (skipLayer)
+                        {
+                            int slotBase = x * CellsPerAxis * CacheSlots + z * CacheSlots;
+                            currentCache[slotBase + 0] = -1;
+                            currentCache[slotBase + 1] = -1;
+                            currentCache[slotBase + 2] = -1;
+                            currentCache[slotBase + 3] = -1;
+                            continue;
+                        }
+
                         // 1. Читаем 8 углов ячейки: ячейка (x,y,z) занимает
                         //    кэш-индексы [x+1, x+2] × [y+1, y+2] × [z+1, z+2].
                         for (int c = 0; c < CornerCount; c++)
@@ -412,12 +518,9 @@ namespace SmilemanStudio.Core.Voxels
                                     fx, fy, fz);
                                 float3 normal = NormalizeGradient(gI);
 
-                                // 7. Материал: в grid-ячейке вершины (chunk-local, без
-                                //    apron-оффсета). Материал ищется в поле по крупным
-                                //    ячейкам (32 м = 64 шага), суб-воксельный сдвиг
-                                //    пренебрежим; сквозная island-local привязка — P5.
-                                byte mat = (byte)IslandMaterialField.At(
-                                    (int)(qfx >> 16), (int)(qfy >> 16), (int)(qfz >> 16), islandId);
+                                // 7. Материал (P5): chunk-local grid 0..16, из nodeMaterial.
+                                //    Regular и transition теперь в единой системе координат.
+                                byte mat = nodeMaterial[((int)(qfx >> 16) * 17 + (int)(qfy >> 16)) * 17 + (int)(qfz >> 16)];
 
                                 positions.Add(vertexPos);
                                 normals.Add(normal);

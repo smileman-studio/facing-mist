@@ -26,37 +26,104 @@ namespace SmilemanStudio.Core.Voxels
     }
 
     /// <summary>
+    /// Буфер сэмпов у переходной грани чанка (P5).
+    /// </summary>
+    /// <remarks>
+    /// Раскладка chunk-local полуячейки: в плоскости грани [-1, 33] × [-1, 33]
+    /// (35×35 = 1225), по нормали [-1, 0, +1] (3 слоя). Итого 3675 сэмплов.
+    /// Заполняется вызывающим через <see cref="VoxelFieldSampler"/>; мешер читает
+    /// только его — ни <see cref="IslandSdf"/>, ни <see cref="IslandMaterialField"/>.
+    /// <para/>
+    /// <c>Origin</c> — минимум буфера в chunk-local полуячейках.
+    /// <c>Size</c> — размер по осям (перестановка 35,35,3).
+    /// </remarks>
+    public struct TransitionFaceSamples
+    {
+        /// <summary>Плотность грани: 35×35×3 = 3675 <c>short</c>.</summary>
+        public NativeArray<short> Density;
+
+        /// <summary>Материал грани: 35×35×3 = 3675 <c>byte</c>.</summary>
+        public NativeArray<byte> Material;
+
+        /// <summary>Chunk-local полуячейка: минимум буфера (перестановка -1/-1/-1 по осям).</summary>
+        public int3 Origin;
+
+        /// <summary>Размер буфера по осям (перестановка 35,35,3).</summary>
+        public int3 Size;
+
+        /// <summary>Направление грани.</summary>
+        public TransitionDirection Direction;
+
+        /// <summary>Плотность по face-local полуячейкам (u,v,w), u,v∈[-1,33], w∈[-1,1].</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public short GetDensityFace(int u, int v, int w)
+        {
+            return Density[ToIndex(u, v, w)];
+        }
+
+        /// <summary>Материал по face-local полуячейкам.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public byte GetMaterialFace(int u, int v, int w)
+        {
+            return Material[ToIndex(u, v, w)];
+        }
+
+        /// <summary>
+        /// Узловой градиент в мировых осях по face-local узлу (u,v,w).
+        /// Центральная разность плотности по буферу ±1 полуячейка.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int3 NodeGradientWorld(int u, int v, int w)
+        {
+            int3 local = TransvoxelTransitionMesher.FaceToLocalSpace(Direction, u, v, w);
+            return new int3(
+                GetDensityChunkLocal(local.x + 1, local.y, local.z) -
+                GetDensityChunkLocal(local.x - 1, local.y, local.z),
+                GetDensityChunkLocal(local.x, local.y + 1, local.z) -
+                GetDensityChunkLocal(local.x, local.y - 1, local.z),
+                GetDensityChunkLocal(local.x, local.y, local.z + 1) -
+                GetDensityChunkLocal(local.x, local.y, local.z - 1));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int ToIndex(int u, int v, int w)
+        {
+            int3 local = TransvoxelTransitionMesher.FaceToLocalSpace(Direction, u, v, w);
+            int3 rel = local - Origin;
+            return (rel.x * Size.y + rel.y) * Size.z + rel.z;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private short GetDensityChunkLocal(int cx, int cy, int cz)
+        {
+            int3 rel = new int3(cx, cy, cz) - Origin;
+            return Density[(rel.x * Size.y + rel.y) * Size.z + rel.z];
+        }
+    }
+
+    /// <summary>
     /// Меширование transition cells Transvoxel (Laine-Krahenbuhl, GDC 2006), LOD &gt;= 1 (P4b).
     /// </summary>
     /// <remarks>
     /// Transition cell — квадратная сетка 2x2 на грани чанка уровня lod, примыкающей
-    /// к чанку уровня lod-1. Углы ячейки — 13 точек в полуячейках (offset 1 = половина
-    /// coarse-ячейки = 1 ячейка мелкой сетки уровня lod-1):
-    ///   - 4 угла сетки (индексы 0, 2, 6, 8) берутся из кэша плотности 19^3 — это узлы
-    ///     coarse-сетки на грани, они же узлы мелкой сетки соседа;
-    ///   - 5 вторичных точек (1, 3, 4, 5, 7) вычисляются генератором IslandSdf.SdfVoxel
-    ///     точно в полушаге coarse-сетки (int3-координата, округления нет);
-    ///   - 4 алиаса (9..12) — углы low-res грани на глубине 2 полуячейки (узлы кэша на
-    ///     глубине 1); edge-коды таблиц адресуют ими кэш вершин (D4a, толщина полосы).
+    /// к чанку уровня lod-1. Углы ячейки — 13 точек в полуячейках:
+    ///   - 4 угла coarse-сетки (0, 2, 6, 8) и 4 алиаса (9..12) — из кэша плотности 19^3;
+    ///   - 5 вторичных точек (1, 3, 4, 5, 7) — из <see cref="TransitionFaceSamples"/>.
     ///
-    /// Отличия от эталона transvoxel_core (принятые решения P4b):
-    ///   - D1: бисекция ребер удалена. Все пересечения — единая Q16-интерполяция
-    ///     <see cref="TransvoxelMesher.EdgeT"/> по целым плотностям концов ребра.
-    ///     Позиция вершины становится чистой функцией пары (концы, плотности) и не
-    ///     зависит от lod чанка — шов LOD-границы герметичен по построению.
-    ///   - D2: secondary vertices удалены вместе с бисекцией (они компенсировали
-    ///     lod-зависимый сдвиг бисекции).
-    ///   - D3: единая система координат выхода — Q16 в полуячейках, финальная
-    ///     конвертация умножением на 2^-17 (step = ячейка lod-1). Для грубого ребра
-    ///     (delta = 2 полуячейки) значение равно 2 * qCell regular-мешера того же
-    ///     чанка, для мелкого (delta = 1) — побитово равно qCell мелкого соседа.
-    ///   - D4: нормаль — целочисленный градиент генератора (центральная разность,
-    ///     шаг 1 воксель LOD0) в опорном вокселе вершины; градиент отдается как есть
-    ///     (int3), нормализация — ответственность Presentation.
+    /// Мешер — чистая функция входных буферов: <c>density</c> (19³),
+    /// <c>nodeMaterial</c> (17³) и <c>face</c> (3675 сэмплов). Кто и чем их наполнил,
+    /// ему знать не надо.
     ///
-    /// Детерминизм: только int/long-арифметика и точные конвертации float ( stepped на
-    /// степени двойки, мантисса вершины <= 2^21). Результат не зависит от порядка
-    /// вызовов, истории lod и включенного Burst.
+    /// Отличия от эталона transvoxel_core (решения P4b/P5):
+    ///   - D1: бисекция удалена, единая Q16-интерполяция → шов герметичен.
+    ///   - D2: secondary vertices удалены.
+    ///   - D3: единая система координат выхода — Q16 в полуячейках × 2⁻¹⁷.
+    ///   - D4: нормаль = трилинейная интерполяция узловых градиентов из буфера.
+    ///   - P5: мешер не зависит от <see cref="IslandSdf"/> и <see cref="IslandMaterialField"/>.
+    ///     Материал вершин берётся из <c>nodeMaterial</c> (regular) и <c>face.Material</c>
+    ///     (transition seam). Координаты материалов — chunk-local, едины для regular и transition.
+    ///
+    /// Детерминизм: только int/long-арифметика и точные конвертации float.
     /// </remarks>
     public static class TransvoxelTransitionMesher
     {
@@ -113,85 +180,38 @@ namespace SmilemanStudio.Core.Voxels
             return chunkOrigin0 + FaceToLocalSpace(direction, x, y, 0) * halfStep;
         }
 
-        /// <summary>
-        /// Плотность граничной точки из генератора (тот же квант, что у кэша).
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static short SampleGenerator(int3 voxel0, IslandId islandId, int radius)
-        {
-            return VoxelDensity.Quantize(IslandSdf.SdfVoxel(voxel0, islandId, radius));
-        }
         
-        /// <summary>
-        /// Узловой градиент МЕЛКОЙ сетки на грани стыка (D4a): центральная разность
-        /// генератора с шагом halfStep вокселей LOD0. Memo 3x3 на ячейку (9 узлов
-        /// плоскости шва: ветвь qw == 0 использует только nz = 0), ленивое заполнение;
-        /// sentinel = int.MinValue. Общие узлы соседних ячеек переиспользуются через
-        /// memo только внутри ячейки — значения при этом побитово идентичны
-        /// (чистая функция мировых координат).
-        /// </summary>
-        private static int3 FaceNodeGradient(
-            NativeArray<int3> memo, TransitionDirection direction, int3 chunkOrigin0,
-            int halfStep, int cellX, int cellY, int nx, int ny,
-            IslandId islandId, int radius)
-        {
-            int slot = ny * 3 + nx;
-            int3 cached = memo[slot];
-            if (cached.x != int.MinValue) return cached;
-            int3 v = chunkOrigin0 + FaceToLocalSpace(direction, 2 * cellX + nx, 2 * cellY + ny, 0) * halfStep;
-            int3 g = new int3(
-                SampleGenerator(v + new int3(halfStep, 0, 0), islandId, radius) - SampleGenerator(v - new int3(halfStep, 0, 0), islandId, radius),
-                SampleGenerator(v + new int3(0, halfStep, 0), islandId, radius) - SampleGenerator(v - new int3(0, halfStep, 0), islandId, radius),
-                SampleGenerator(v + new int3(0, 0, halfStep), islandId, radius) - SampleGenerator(v - new int3(0, 0, halfStep), islandId, radius));
-            memo[slot] = g;
-            return g;
-        }
 
         /// <summary>
-        /// Меширование transition cells одной грани чанка в готовые growable-выходы (P4b).
+        /// Меширование transition cells одной грани чанка в готовые growable-выходы (P4b/P5).
         /// </summary>
         /// <param name="density">
-        /// Кэш плотности чанка уровня lod: 19^3 <c>short</c>, XYZ-мажорный
-        /// (тот же буфер, что для regular-меширования этого чанка).
+        /// Кэш плотности чанка уровня lod: 19^3 <c>short</c>, XYZ-мажорный.
         /// </param>
-        /// <param name="islandId">Идентификатор острова.</param>
-        /// <param name="radius">Радиус острова, м.</param>
-        /// <param name="chunkOrigin0">Origin чанка в вокселях LOD0 (<c>chunkCoord << (4 + lod)</c>).</param>
+        /// <param name="nodeMaterial">
+        /// Материал узловой сетки чанка: 17^3 <c>byte</c>, XYZ-мажорный.
+        /// </param>
+        /// <param name="face">
+        /// Буфер сэмпов у грани: <see cref="TransitionFaceSamples"/>.
+        /// </param>
         /// <param name="direction">Грань чанка, на которой строятся transition cells.</param>
-        /// <param name="lod">Уровень чанка (lod &gt;= 1; при lod = 0 transition cells нет).</param>
         /// <param name="positions">Выход: позиции в ячейках lod-1 (float, из Q16 * 2^-17).</param>
         /// <param name="gradients">Выход: целочисленные градиенты (нормализует Presentation).</param>
         /// <param name="materials">Выход: материалы вершин (<see cref="VoxelMaterial"/> в byte).</param>
         /// <param name="indices">Выход: индексы треугольников (3 на треугольник).</param>
         /// <remarks>
-        /// Контракты:
-        ///   - density.Length == <see cref="TransvoxelMesher.CacheVolume"/> (проверка снаружи: throw
-        ///     недоступен в Burst);
-        ///   - списки на входе пусты или содержат предыдущий результат (append-режим,
-        ///     индексы продолжатся с positions.Length);
-        ///   - метод — чистая функция входов: без throw, без managed-аллокаций, только
-        ///     прямое обращение к static readonly таблицам (Burst-safe).
+        /// Мешер — чистая функция входных буферов. Guard <c>lod &gt;= 1</c> — обязанность вызывающего.
         /// </remarks>
         public static void MeshTransitionInto(
             NativeArray<short> density,
-            IslandId islandId,
-            int radius,
-            int3 chunkOrigin0,
+            NativeArray<byte> nodeMaterial,
+            in TransitionFaceSamples face,
             TransitionDirection direction,
-            int lod,
             NativeList<float3> positions,
             NativeList<int3> gradients,
             NativeList<byte> materials,
             NativeList<uint> indices)
         {
-            // Guard D7: transition cells существуют только при lod >= 1
-            // (halfStep = 1 << (lod - 1) определён именно для них).
-            if (lod < 1)
-            {
-                return;
-            }
-
-            int halfStep = 1 << (lod - 1);
             int cacheVolume = CellsPerAxis * CacheSlots;
 
             // Кэш вершин грани: два дока по 16 * 10 int, инициализированы -1 (D5).
@@ -205,37 +225,33 @@ namespace SmilemanStudio.Core.Voxels
 
             var cellValues = new NativeArray<short>(CornerCount, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
             var vertexIndices = new NativeArray<int>(TransvoxelTransitionTables.MaxVertexDataPerCase, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            var faceNodes = new NativeArray<int3>(9, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
 
             for (int y = 0; y < CellsPerAxis; y++)
             {
                 for (int x = 0; x < CellsPerAxis; x++)
                 {
                     // 1. Углы ячейки (полуячейки: x, y в 0..32).
-                    //    4 угла coarse-сетки — из кэша; индекс кэша = local + apron(1),
-                    //    coarse-координаты = полуячейки / 2 (всегда точное деление).
+                    //    4 угла coarse-сетки — из кэша 19³; индекс = local + apron(1).
                     cellValues[0] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x, 2 * y, 0) / 2 + 1);
                     cellValues[2] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y, 0) / 2 + 1);
                     cellValues[6] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x, 2 * y + 2, 0) / 2 + 1);
                     cellValues[8] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y + 2, 0) / 2 + 1);
 
-                    //    5 вторичных точек (середины coarse-рёбер и центр) — из генератора,
-                    //    точно в полушаге: voxel0 = origin + local * 2^(lod-1) (D1, без округления).
-                    cellValues[1] = SampleGenerator(FaceVoxel0(direction, chunkOrigin0, halfStep, 2 * x + 1, 2 * y), islandId, radius);
-                    cellValues[3] = SampleGenerator(FaceVoxel0(direction, chunkOrigin0, halfStep, 2 * x, 2 * y + 1), islandId, radius);
-                    cellValues[4] = SampleGenerator(FaceVoxel0(direction, chunkOrigin0, halfStep, 2 * x + 1, 2 * y + 1), islandId, radius);
-                    cellValues[5] = SampleGenerator(FaceVoxel0(direction, chunkOrigin0, halfStep, 2 * x + 2, 2 * y + 1), islandId, radius);
-                    cellValues[7] = SampleGenerator(FaceVoxel0(direction, chunkOrigin0, halfStep, 2 * x + 1, 2 * y + 2), islandId, radius);
+                    //    5 вторичных точек (середины coarse-рёбер и центр) — из face.
+                    cellValues[1] = face.GetDensityFace(2 * x + 1, 2 * y, 0);
+                    cellValues[3] = face.GetDensityFace(2 * x, 2 * y + 1, 0);
+                    cellValues[4] = face.GetDensityFace(2 * x + 1, 2 * y + 1, 0);
+                    cellValues[5] = face.GetDensityFace(2 * x + 2, 2 * y + 1, 0);
+                    cellValues[7] = face.GetDensityFace(2 * x + 1, 2 * y + 2, 0);
 
                     //    4 угла low-res грани (глубина 2 полуячейки = 1 coarse-ячейка) —
-                    //    узлы кэша на глубине 1, как в эталоне transvoxel_core:
-                    //    полоса получает толщину, qw > 0 существует (D4a).
+                    //    узлы кэша 19³ на глубине 1, как в эталоне transvoxel_core.
                     cellValues[9]  = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x,     2 * y,     2) / 2 + 1);
                     cellValues[10] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y,     2) / 2 + 1);
                     cellValues[11] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x,     2 * y + 2, 2) / 2 + 1);
                     cellValues[12] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y + 2, 2) / 2 + 1);
 
-                    // 2. Case code: 9 бит, порядок обхода углов 0,1,2,5,8,7,6,3,4 (п.4).
+                    // 2. Case code: 9 бит, порядок обхода углов 0,1,2,5,8,7,6,3,4.
                     int caseCode = ((cellValues[0] < 0 ? 1 : 0)
                                   | (cellValues[1] < 0 ? 2 : 0)
                                   | (cellValues[2] < 0 ? 4 : 0)
@@ -246,25 +262,21 @@ namespace SmilemanStudio.Core.Voxels
                                   | (cellValues[3] < 0 ? 128 : 0)
                                   | (cellValues[4] < 0 ? 256 : 0));
 
-                    // Сброс слотов 0,1,2,7 кэша текущей ячейки — ДО continue (эталон
-                    // строки 140-143): эти слоты читаются соседями по x и y, их должно
-                    // затронуть даже пропущенная ячейка.
+                    // Сброс слотов 0,1,2,7 кэша текущей ячейки — ДО continue.
                     currentCache[0 * CellsPerAxis + x] = -1;
                     currentCache[1 * CellsPerAxis + x] = -1;
                     currentCache[2 * CellsPerAxis + x] = -1;
                     currentCache[7 * CellsPerAxis + x] = -1;
-                    
-                    for (int i = 0; i < 9; i++) faceNodes[i] = new int3(int.MinValue);
 
                     if (caseCode == 0 || caseCode == 511)
                     {
                         continue;
                     }
 
-                    // Кэшируема ли вершина по осям грани: ячейка не на границе грани (2 бита, D5).
+                    // Кэшируема ли вершина по осям грани (2 бита).
                     int cacheValidator = (x != 0 ? 0b01 : 0) | (y != 0 ? 0b10 : 0);
 
-                    // 3. Lookup: класс -> геометрия, case code -> edge codes (п.4).
+                    // 3. Lookup: класс -> геометрия, case code -> edge codes.
                     int cellClass = TransvoxelTransitionTables.TransitionCellClass[caseCode];
                     int classIdx = cellClass & 0x7F;
                     int geoCounts = TransvoxelTransitionTables.TransitionCellGeometryCounts[classIdx];
@@ -287,8 +299,7 @@ namespace SmilemanStudio.Core.Voxels
                         int cacheIdx = (edgeCode >> 8) & 0x0F;
                         int cacheDir = edgeCode >> 12;
 
-                        // Угол точно на поверхности (d == 0): слот кэша берётся из
-                        // TransitionCornerData (углы алиасов 9..12 адресуются им же).
+                        // Угол точно на поверхности (d == 0).
                         if (d1 == 0)
                         {
                             byte cornerData = TransvoxelTransitionTables.TransitionCornerData[c1];
@@ -316,11 +327,7 @@ namespace SmilemanStudio.Core.Voxels
                         {
                             vertexIndex = positions.Length;
 
-                            // 5. Позиция: единая Q16-интерполяция по целым плотностям
-                            //    концов (D1). Corner-случай (d == 0) даёт t = 0 или 65536,
-                            //    т.е. точную позицию угла — отдельная ветка не нужна.
-                            //    z угла берётся из таблицы: 0 — плоскость шва, 2 — low-res
-                            //    грань полосы (толщина 1 coarse-ячейка, D4a).
+                            // 5. Позиция: единая Q16-интерполяция (D1).
                             int3 h0 = FaceToLocalSpace(direction,
                                 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3],
                                 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1],
@@ -335,27 +342,14 @@ namespace SmilemanStudio.Core.Voxels
                             long qy = (long)h0.y * 65536 + (long)(h1.y - h0.y) * t;
                             long qz = (long)h0.z * 65536 + (long)(h1.z - h0.z) * t;
 
-                            // 6. Опорный воксель вершины (D4/D6): конец ребра с меньшим
-                            //    |density|; при равенстве — конец с меньшим индексом угла.
+                            // 6. Опорный воксель вершины (D4).
                             int abs0 = math.abs((int)d0);
                             int abs1 = math.abs((int)d1);
                             int anchor = abs0 < abs1 ? c0 : (abs1 < abs0 ? c1 : (c0 < c1 ? c0 : c1));
-                            int3 anchorVoxel0 = chunkOrigin0 + FaceToLocalSpace(direction,
-                                2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3],
-                                2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1],
-                                TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 2]) * halfStep;
 
                             // 7. Градиент (D4a): трилинейная интерполяция узловых градиентов.
-                            //    Q16 вершины считается в ГРАНЬ-пространстве (qu, qv, qw) —
-                            //    не зависит от перестановки осей FaceToLocalSpace.
-                            //    qw == 0 (грань стыка): узлы МЕЛКОЙ сетки (шаг halfStep вокселей
-                            //    LOD0) из генератора; свёртка в порядке ЛОКАЛЬНЫХ осей (нулевой
-                            //    вес вдоль нормали прозрачен) — побитово совпадает с нормалью
-                            //    мелкого regular-соседа на всех шести гранях.
-                            //    qw > 0 (внутри полосы и на low-res грани): узлы coarse-кэша в
-                            //    локальных координатах, свёртка x→y→z как в MeshInto — побитово
-                            //    совпадает с own regular. Выход — int3 (D4), нормализация через
-                            //    TransvoxelMesher.NormalizeGradient на стороне Presentation.
+                            //    qw == 0: узлы МЕЛКОЙ сетки из face-буфера.
+                            //    qw > 0:  узлы coarse-кэша из density.
                             long qu = (long)(2 * x + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3]) * 65536
                                     + (long)(TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3]
                                            - TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3]) * t;
@@ -373,28 +367,26 @@ namespace SmilemanStudio.Core.Voxels
                                 int fny = (int)(qv >> 16) - 2 * y;
                                 int ffx = (int)(qu & 0xFFFF);
                                 int ffy = (int)(qv & 0xFFFF);
-                                // При нулевой доле соседний узел не нужен (вес 0) — не выходим за memo 3x3.
                                 int fnx1 = ffx == 0 ? fnx : fnx + 1;
                                 int fny1 = ffy == 0 ? fny : fny + 1;
-                                int3 g00 = FaceNodeGradient(faceNodes, direction, chunkOrigin0, halfStep, x, y, fnx,  fny,  islandId, radius);
-                                int3 g10 = FaceNodeGradient(faceNodes, direction, chunkOrigin0, halfStep, x, y, fnx1, fny,  islandId, radius);
-                                int3 g01 = FaceNodeGradient(faceNodes, direction, chunkOrigin0, halfStep, x, y, fnx,  fny1, islandId, radius);
-                                int3 g11 = FaceNodeGradient(faceNodes, direction, chunkOrigin0, halfStep, x, y, fnx1, fny1, islandId, radius);
-                                // Локальные оси грань-направлений u и v: свёртку in-plane ведём
+                                // Узловые градиенты из face-буфера (центральная разность ±1 полуячейка).
+                                int3 g00 = face.NodeGradientWorld(2 * x + fnx,  2 * y + fny,  0);
+                                int3 g10 = face.NodeGradientWorld(2 * x + fnx1, 2 * y + fny,  0);
+                                int3 g01 = face.NodeGradientWorld(2 * x + fnx,  2 * y + fny1, 0);
+                                int3 g11 = face.NodeGradientWorld(2 * x + fnx1, 2 * y + fny1, 0);
+                                // Локальные оси грань-направлений u и v: свёртка in-plane
                                 // в порядке возрастания локальной оси (как у fine-соседа).
                                 int3 eU = FaceToLocalSpace(direction, 1, 0, 0);
                                 int3 eV = FaceToLocalSpace(direction, 0, 1, 0);
                                 int au = eU.x != 0 ? 0 : (eU.y != 0 ? 1 : 2);
                                 int av = eV.x != 0 ? 0 : (eV.y != 0 ? 1 : 2);
-                                // Третья (нормальная) свёртка с весом 0 прозрачна: слои nz = 1
-                                // дублируются, узлы плоскости шва используются дважды.
                                 gI = au < av
                                     ? TransvoxelMesher.TrilinearGradient(g00, g10, g01, g11, g00, g10, g01, g11, ffx, ffy, 0)
                                     : TransvoxelMesher.TrilinearGradient(g00, g01, g10, g11, g00, g01, g10, g11, ffy, ffx, 0);
                             }
                             else
                             {
-                                // Q16 coarse-ячеек в ЛОКАЛЬНЫХ координатах: coarse = 2 полуячейки (q / 2).
+                                // Q16 coarse-ячеек в ЛОКАЛЬНЫХ координатах.
                                 long cx = qx >> 1, cy = qy >> 1, cz = qz >> 1;
                                 int3 c000 = new int3((int)(cx >> 16), (int)(cy >> 16), (int)(cz >> 16)) + 1;
                                 gI = TransvoxelMesher.TrilinearGradient(
@@ -409,19 +401,31 @@ namespace SmilemanStudio.Core.Voxels
                                     (int)(cx & 0xFFFF), (int)(cy & 0xFFFF), (int)(cz & 0xFFFF));
                             }
 
-                            // 8. Материал: поле в опорном вокселе вершины (D6).
-                            byte mat = (byte)IslandMaterialField.At(
-                                anchorVoxel0.x, anchorVoxel0.y, anchorVoxel0.z, islandId);
+                            // 8. Материал (P5): единая chunk-local система координат.
+                            //    anchor w=0 → из face.Material; anchor w=2 → из nodeMaterial.
+                            int anchorW = TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 2];
+                            byte mat;
+                            if (anchorW == 0)
+                            {
+                                int aU = 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3];
+                                int aV = 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1];
+                                mat = face.GetMaterialFace(aU, aV, 0);
+                            }
+                            else
+                            {
+                                int3 hAnchor = FaceToLocalSpace(direction,
+                                    2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3],
+                                    2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1],
+                                    2);
+                                int3 coarse = hAnchor / 2;
+                                mat = nodeMaterial[(coarse.x * 17 + coarse.y) * 17 + coarse.z];
+                            }
 
                             positions.Add(new float3((float)qx, (float)qy, (float)qz) * InvQ16HalfCell);
                             gradients.Add(gI);
                             materials.Add(mat);
 
-                            // 9. Запись в кэш вершин (асимметрия эталона сохранена:
-                            //    corner-ветка пишет при cacheable, edge-ветка — при
-                            //    cacheable && cacheDir != 4; под 2-битным валидатором
-                            //    cacheDir == 4 никогда не cacheable, поэтому ветки
-                            //    объединены без изменения поведения).
+                            // 9. Запись в кэш вершин.
                             if (cacheDir == 8)
                             {
                                 currentCache[cacheIdx * CellsPerAxis + x] = vertexIndex;
@@ -435,7 +439,7 @@ namespace SmilemanStudio.Core.Voxels
                         vertexIndices[i] = vertexIndex;
                     }
 
-                    // 10. Треугольники; flip winding по старшему биту класса (п.4).
+                    // 10. Треугольники; flip winding по старшему биту класса.
                     int triVertCount = triCount * 3;
                     if (!flipWinding)
                     {
@@ -457,7 +461,7 @@ namespace SmilemanStudio.Core.Voxels
                     }
                 }
 
-                // Swap dock-ов между строками y (после строки, не после ячейки — D5).
+                // Swap dock-ов между строками y.
                 var tmp = currentCache;
                 currentCache = previousCache;
                 previousCache = tmp;
@@ -468,7 +472,6 @@ namespace SmilemanStudio.Core.Voxels
             previousCache.Dispose();
             cellValues.Dispose();
             vertexIndices.Dispose();
-            faceNodes.Dispose();
         }
     }
 }

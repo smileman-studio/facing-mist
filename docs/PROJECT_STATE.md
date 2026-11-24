@@ -82,15 +82,29 @@
     - `PlayerPosition` (ECS-синглтон: позиция игрока в `float3`).
     - `TierCalculator` (чистая функция определения тира по квадрату расстояния и радиусу острова).
     - `TierManagerSystem` (раз в секунду пересчитывает тир: обновляет `Tier` и `Revision` в `IslandTierState`).
-    - `Simulation.Voxels.VoxelChunkSampler` — геометрия и выборка кэша плотности чанка (ADR-0002, D3): `AxisToVoxel`, `VoxelFromIndices`, `ChunkOrigin0`, `Sample`/`SampleCore` (19³ `short`, XYZ-мажор), `SampleOne`, `IsInterior`/`IsApron`. Скалярный индекс снабжён явной осью — иначе сдвиг транслировался бы во все три компонента (`int3 + int` = broadcast).
-    - `Simulation.Voxels.SampleVoxelChunkJob` — `[BurstCompile] IJob`, заполняет `NativeArray<short>` 19³ через `SampleCore`; чистая функция от ключа чанка, `IslandId` и радиуса.
-    - `Simulation.Voxels.MeshVoxelChunkJob` — `[BurstCompile] IJob`, вход: chunkKey+islandId+radius; выход: NativeArray positions/normals/indices/materials. Вызывает `TransvoxelMesher.MeshInto` с NativeList-полями (паттерн Burst IJob без IJob<T>).
+    - `Simulation.Voxels.SampleVoxelChunkJob` — `[BurstCompile] IJob`, заполняет scratch-буферы
+      через generic `VoxelFieldSampler.FillDensity` / `FillNodeMaterial` (работает с любым
+      `IVoxelDensityField`/`IVoxelMaterialField`, не знает про остров).
+    - `Simulation.Voxels.MeshVoxelChunkJob` — `[BurstCompile] IJob`, вход: chunkKey+islandId+radius+SeamFaceMask;
+      выход: NativeArray positions/normals/indices/materials. Вызывает `TransvoxelMesher.MeshInto`
+      с NativeList-полями (паттерн Burst IJob без IJob<T>).
+    - `Simulation.Voxels.VoxelChunkBuildJob<TD,TM>` — generic `[BurstCompile] IJob`: field + request →
+      объединённая геометрия (regular + transition) через `VoxelChunkMesher.BuildChunk`. Джоба видит
+      только контракты полей — автономность движка в job-системе.
 4. **Presentation (рендер):**
-    - `Presentation.Voxels.VoxelChunkMeshBuilder` — сборка `UnityEngine.Mesh` из `TransvoxelMeshOutput`: grid→world (шаг 0.5 м), vertex color по палитре `VoxelMaterial`, indexFormat UInt32.
-    - `Presentation.Voxels.VoxelChunkView` — MonoBehaviour-мост: `VoxelChunkSampler` → `TransvoxelMesher.Mesh` → `VoxelChunkMeshBuilder.Build` → `MeshFilter`. Материал `Sprites/Default` (unlit vertex color).
+    - `Presentation.Voxels.VoxelChunkMeshBuilder` — сборка `UnityEngine.Mesh` из `VoxelChunkGeometry`:
+      grid→world, vertex color по палитре `VoxelMaterial`, indexFormat UInt32.
+    - `Presentation.Voxels.VoxelChunkView` — MonoBehaviour-мост: `IslandDensityField`/`IslandMaterialAdapter`
+      → `VoxelChunkMesher.BuildChunk` → `VoxelChunkMeshBuilder.Build` → `MeshFilter`.
+    - `Presentation.VoxelDebugLodCascade`, `Presentation.VoxelDebugSphere` — debug-сцены на движке:
+      `SphereDensityField` + `NullMaterialField` + `VoxelLodPlanner.Plan` + `VoxelChunkMesher.BuildChunk`.
 5. **Bootstrap:** `WorldBootstrapSystem` (спавнит тестового игрока и 100 островов при старте). Радиусы берутся из `VoxelConstants`, острова раскладываются rejection sampling по `IslandFootprint`: расстояние между краями не меньше радиуса меньшего острова. Верхней границы дистанции нет.
 6. **Тесты:**
-    - **EditMode (16 фикстур, 266 тестов):** `IslandIdTests`, `IslandTierStateTests`, `TierCalculatorTests`, `WorldHasherTests`, `IslandFootprintTests`, `VoxelLodTests`, `VoxelCoordTests`, `VoxelChunkCoordTests`, `VoxelDensityTests`, `VoxelNoiseTests`, `VoxelEnumTypesTests`, `IslandSdfTests`, `IslandMaterialFieldTests`, `VoxelChunkSamplerTests`, `TransvoxelTablesTests`, `TransvoxelMesherTests` (включая transition cells P4b).
+    - **EditMode (18 фикстур, 242 теста):** `IslandIdTests`, `IslandTierStateTests`, `TierCalculatorTests`, `WorldHasherTests`, `IslandFootprintTests`, `VoxelLodTests`, `VoxelCoordTests`, `VoxelChunkCoordTests`, `VoxelDensityTests`, `VoxelNoiseTests`, `VoxelEnumTypesTests`, `IslandSdfTests`, `IslandMaterialFieldTests`, `TransvoxelTablesTests`, `TransvoxelMesherTests`, `TransvoxelNormalInterpolationTests`,
+      `VoxelFieldSamplerTests` (generic fill + геометрия), `VoxelLodPlannerTests` (инвариант seam↔finer-сосед,
+      нет двойного покрытия, детерминизм, chunkKey roundtrip), `VoxelChunkMesherTests` (валидная геометрия,
+      unit-нормали, transition в coarse-пространстве — регрессия на дыры, seam mask меняет геометрию,
+      детерминизм, паритет джобы, bitwise-совпадение с островом).
     - **PlayMode (4):** `TierManagerPlayModeTests`, `WorldBootstrapPlayModeTests`, `VoxelPresentationPlayModeTests` (2 теста: сборка меша + рендер через RenderTexture).
 
 # P4a завершён: Transvoxel regular cells (LOD 0)
@@ -112,6 +126,38 @@
 - Материалы: `IslandMaterialField.At` в grid-ячейке вершины.
 - Golden hashes (FNV-1a 64): `RegularCornerOffset 0x229B64048EA9BCC5`, `RegularCellClass 0xEFFBF2112A9922D7`, `RegularCellGeometryCounts 0x132487C81C138B5D`, `RegularCellTriangleIndices 0xD656F9622A6EECE0`, `RegularVertexDataFlat 0x25A2E854318F80CD`.
 
+# P5 завершён: чистые буферные входные мешера (2026-11-22)
+
+`TransvoxelMesher.MeshInto` и `TransvoxelTransitionMesher.MeshTransitionInto`
+превращены в чистые функции трёх входных буферов:
+
+| Буфер | Размер | Тип | Описание |
+|-------|--------|-----|----------|
+| `density` | 19³ | `short` | Плотность чанка LOD0. |
+| `nodeMaterial` | 17³ | `byte` | Узловая сетка материала. |
+| `face` | 35×35×3 | `short` + `byte` | `TransitionFaceSamples` для transition-граней. |
+
+Ключевые изменения:
+- Убрана зависимость `MeshTransitionInto` от `IslandSdf.SdfVoxel` — вторичные
+  точки берутся из `TransitionFaceSamples`, заполняемого через
+  `VoxelChunkSampler.SampleFace`.
+- Убрана зависимость `MeshInto` / `MeshTransitionInto` от `IslandMaterialField.At` —
+  материал берётся из `nodeMaterial` / `face.Material`, заполняемого через
+  `VoxelChunkSampler.SampleNodeMaterial`.
+- Единая система координат материала: regular и transition используют chunk-local
+  grid (0..16).
+- `VoxelChunkSampler` расширен: `SampleNodeMaterial` (17³ byte), `SampleFace`
+  (35×35×3 short + byte), константы `NodeMaterialVolume = 17³`,
+  `FaceSamplesVolume = 35×35×3 = 3675`.
+- `SampleVoxelChunkJob` и `MeshVoxelChunkJob` обновлены для `NodeMaterial`.
+- Presentation обновлена: `VoxelChunkView`, `VoxelDebugSphere`,
+  `VoxelDebugLodCascade` — все заполняют буферы до вызова мешера.
+- ADR-0002 разделы D4/D7 обновлены.
+- Все 273 EditMode + 4 PlayMode тестов прошли.
+
+**Следующий этап:** Реализация `VoxelChunkView` с полным стримингом и
+`Hydrate`/`Dehydrate` для transition-островов.
+
 # P4b завершён: Transvoxel transition cells (LOD > 0)
 Реализовано в `Core/Voxels/TransvoxelTransitionTables.cs` + `Core/Voxels/TransvoxelMesher.Transitions.cs`:
 - Таблицы transition cells Laine–Krahenbuhl (GDC 2006) — Burst-safe flat arrays: 13 углов ячейки (4 угла coarse-сетки + 5 вторичных точек + 4 алиаса), 512 case-кодов → 56 классов, `MaxCellTriangleIndices = 36`.
@@ -122,3 +168,64 @@
 - Тесты: +15 (guard lod=0, all-air/solid, реальный остров, детерминизм, все 6 граней, **шов с fine-соседом** — позиции совпадают в пределах Q16-кванта).
 
 **Следующий этап — P5:** Ядро и переходный слой (см. `docs/VOXEL_ROADMAP.md`).
+
+# P6 завершён: автономный воксельный движок (generic field-контракт)
+
+Движок переведён на полностью generic-контракты: ANY shape (остров, сфера, том, что
+угодно) мешируется одним путём. Вызывающий поставляет только плотность + материал +
+AABB + позицию игрока; всё остальное (LOD-каскад, seam-шов, геометрия) считает движок,
+и всё считается в джобах (Burst-safe, без managed-аллокаций).
+
+## Новые модули (Core/Voxels)
+- `IVoxelDensityField { short SampleDensity(int3 voxel); }` — generic-контракт плотности.
+  Burst деvirtуализирует вызовы (struct + интерфейс).
+- `IVoxelMaterialField { byte SampleMaterial(int3 voxel); }` — generic-контракт материала.
+- `VoxelFieldSampler` — generic выборка, знает только контракт + геометрию чанка (не остров/сферу):
+  `FillDensity<TD>` (19³ scratch), `FillNodeMaterial<TM>` (17³ scratch), `FillFace<TD,TM>` (35×35×3),
+  geometry helpers `ChunkOrigin0`, `VoxelFromIndices`, `FaceMinCorner/Size`. Константы:
+  `CacheVolume=6859`, `NodeMaterialVolume=4913`, `FaceSamplesVolume=3675`.
+- `VoxelChunkRequest` — struct: `ChunkCoord`, `Lod`, `Origin0`, `SeamFaceMask`.
+- `VoxelLodPlanner` — планировщик LOD-каскада (geometry-clipmap): `Plan(boundsMin, boundsMax,
+  playerVox, lodMax, NativeList<VoxelChunkRequest>)`. Регион R_k — куб (2·`RegionHalfChunks`)³
+  чанков уровня k, центр снапан на сетку k+1. Чанк мешируется, если не покрыт R_{k-1} и
+  пересекает AABB фигуры. `RegionHalfChunks = 4`.
+- `VoxelChunkGeometry` — struct с NativeList positions/normals/materials/indices, IDisposable.
+- `VoxelChunkMesher` — generic-оркестратор `BuildChunk<TD,TM>(fields, request, ref geometry,
+  densityScratch, nodeMatScratch)`: fill → regular → transition → combined geometry.
+- `IslandDensityField` (обёртка `IslandSdf.SdfVoxel`), `IslandMaterialAdapter` (обёртка
+  `IslandMaterialField.At`), `SphereDensityField`, `NullMaterialField` — реализации контрактов.
+  Все в Core (чистая математика), чтобы EditMode-тесты использовали их без ссылки на Presentation.
+
+## Исправлены дыры между LOD-чанками (корневая причина)
+Старый `VoxelDebugLodCascade` ставил seam-бит по совпадению грани региона с границей
+(`origin0 + chunkVox == cf - hf`), не проверяя, что finer-сосед реально мешируется → на
+угловых чанках появлялась transition-полоса без finer-геометрии (дыра/двойная стенка).
+- **Фикс в `VoxelLodPlanner`:** seam-бит ставится ТОГДА И ТОЛЬКО КОГДА сосед через грань
+  покрыт finer-регионом И сам сосед пересекает AABB фигуры (значит будет меширован).
+  За счёт снапа центра finer-региона на сетку k+1 частичного перекрытия нет по построению —
+  coarse-чанк покрыт R_{k-1} целиком либо вовсе.
+- **Фикс в `VoxelChunkMesher.AppendTransitions`:** transition-вершины выходили в half-cell
+  пространстве (0..32), но масштабировались тем же `cellVox = 1<<lod`, что и regular (0..16) →
+  шов уезжал в 2 раза дальше → трещина. Теперь позиции transition делятся на 2 (half-cell →
+  coarse-cell), единая система координат. Регрессия зафиксирована тестом
+  `VoxelChunkMesherTests.TransitionVertices_InCoarseCellSpace_NotHalfCell`.
+
+## Миграция вызывающих сторон
+- `Simulation.Voxels.VoxelChunkSampler` **удалён** (+ .meta); его заменил generic `VoxelFieldSampler`.
+- `SampleVoxelChunkJob` / `MeshVoxelChunkJob` переведены на `VoxelFieldSampler.Fill*`;
+  `MeshVoxelChunkJob` получил поле `SeamFaceMask`. Добавлен generic `VoxelChunkBuildJob<TD,TM>`.
+- `Presentation.VoxelDebugLodCascade`, `VoxelDebugSphere`, `Voxels/VoxelChunkView` переписаны на движок
+  (`VoxelLodPlanner.Plan` + `VoxelChunkMesher.BuildChunk`); `VoxelChunkMeshBuilder` получил
+  новую сигнатуру `Build(in VoxelChunkGeometry, origin0, lod, worldOrigin)` с масштабом `cellVox = 1<<lod`.
+- `Presentation.Voxels/SphereDensityField.cs` перемещён в Core.
+
+## Тесты
+- **Удалены устаревшие:** `VoxelChunkSamplerTests`.
+- **Новые:** `VoxelFieldSamplerTests`, `VoxelLodPlannerTests`, `VoxelChunkMesherTests`.
+- **Починены golden-тесты:** `TransvoxelMesherTests`, `TransvoxelNormalInterpolationTests`
+  (вызовы `VoxelChunkSampler` заменены на `IslandDensity/IslandNodeMat/IslandFace` helpers),
+  `VoxelPresentationPlayModeTests` (новая сигнатура builder).
+- Итог: `check_arch.py` → OK; EditMode **242/242 Passed**; PlayMode **4/4 Passed**.
+
+**Следующий этап:** полный стриминг чанков (`VoxelChunkView`) + `Hydrate`/`Dehydrate`
+transition-островов (см. `docs/VOXEL_ROADMAP.md`).

@@ -1,5 +1,5 @@
-using SmilemanStudio.Core;
-using SmilemanStudio.Core.Voxels;
+﻿using SmilemanStudio.Core.Voxels;
+using SmilemanStudio.Presentation.Voxels;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
@@ -7,188 +7,141 @@ using UnityEngine;
 namespace SmilemanStudio.Presentation
 {
     /// <summary>
-    /// Отладочный MonoBehaviour для визуализации воксельного меша в редакторе/игре.
-    /// Генерирует сферу, разбитую на сетку чанков (по умолчанию 4x4x4),
-    /// чтобы проверить корректность мешинга и генерации на швах.
-    /// Transform этого объекта является центром сферы.
+    /// Отладочная воксельная сфера через автономный движок (ADR-0002, D7).
     /// </summary>
+    /// <remarks>
+    /// Демонстрирует минимальную форму без островов: вызывающий даёт только
+    /// <see cref="SphereDensityField"/> + AABB сферы + позицию игрока. LOD и швы
+    /// считает движок. По умолчанию lodMax = 0 (один уровень) — быстрый контроль
+    /// корректности мешинга; при lodMax &gt; 0 показывает LOD-каскад на сфере.
+    /// Transform этого объекта — центр сферы.
+    /// </remarks>
     public class VoxelDebugSphere : MonoBehaviour
     {
-        [Header("Grid Settings")]
-        [Tooltip("Количество чанков по каждой оси (X, Y, Z).")]
-        public int3 ChunkGridSize = new int3(4, 4, 4);
-
         [Header("Sphere Settings")]
-        [Tooltip("Радиус сферы в метрах. Диаметр 8м означает радиус 4м. Шаг сетки 0.5м.")]
+        [Tooltip("Радиус сферы, м.")]
         public float SphereRadiusMeters = 10f;
+
+        [Header("Engine Settings")]
+        [Tooltip("Максимальный LOD (0 — один уровень).")]
+        [Range(0, 9)] public int LodMax = 0;
 
         [Header("Rendering")]
         public Material MeshMaterial;
-        [Tooltip("Раскрасить вершины цветами в зависимости от материала (Dirt, Coal, Sand, Quartz).")]
-        public bool UseVertexColors = true;
+        [Tooltip("Раскрасить вершины по материалу (для сферы материал None → маджента).")]
+        public bool UseVertexColors = false;
 
-        private GameObject _chunksRoot;
-        private const float VOXEL_STEP = 0.5f;
+        GameObject _chunksRoot;
+        VoxelChunkGeometry geometry = new VoxelChunkGeometry();
+        NativeArray<short> densityScratch;
+        NativeArray<byte> nodeMatScratch;
 
-        private void Start()
-        {
-            Generate();
-        }
+        const float VoxelStep = 0.5f;
 
-        [ContextMenu("Regenerate Sphere")]
+        void Start() => Generate();
+
+        [ContextMenu("Generate")]
         public void Generate()
         {
             Clear();
 
+            int radiusVox = math.max(1, (int)math.round(SphereRadiusMeters / VoxelStep));
+            int3 centerVox = int3.zero;
+
+            var sphereField = new SphereDensityField(centerVox, radiusVox);
+            var nullMat = new NullMaterialField();
+
+            int3 boundsMin = centerVox - radiusVox;
+            int3 boundsMax = centerVox + radiusVox;
+
+            // Игрок в центре → каскад вокруг сферы.
+            int3 playerVox = centerVox;
+
             _chunksRoot = new GameObject("VoxelSphere_Chunks");
             _chunksRoot.transform.SetParent(transform, false);
 
-            // Переводим метры в воксели (1 воксель = 0.5 метра)
-            int radiusVoxels = Mathf.RoundToInt(SphereRadiusMeters / VOXEL_STEP);
-            float3 sphereCenterVoxels = float3.zero; 
+            if (!densityScratch.IsCreated)
+                densityScratch = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            if (!nodeMatScratch.IsCreated)
+                nodeMatScratch = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            if (!geometry.Positions.IsCreated)
+                geometry.Allocate(Allocator.Persistent);
 
-            // Валидный ID острова (0 = invalid по правилам ADR/AGENTS)
-            IslandId islandId = new IslandId(1); 
-            
-            int chunkVoxelSize = 1 << VoxelConstants.ChunkSizeLog2; // 16 вокселей
+            var requests = new NativeList<VoxelChunkRequest>(Allocator.Persistent);
+            VoxelLodPlanner.Plan(boundsMin, boundsMax, playerVox, LodMax, requests);
 
-            // Центрируем сетку чанков относительно центра (0,0,0)
-            int3 minChunk = -(ChunkGridSize / 2);
-
-            for (int cx = 0; cx < ChunkGridSize.x; cx++)
+            foreach (var req in requests)
             {
-                for (int cy = 0; cy < ChunkGridSize.y; cy++)
-                {
-                    for (int cz = 0; cz < ChunkGridSize.z; cz++)
-                    {
-                        int3 chunkCoord = minChunk + new int3(cx, cy, cz);
-                        int3 chunkOriginVoxels = chunkCoord * chunkVoxelSize;
-
-                        // 1. Генерация кэша плотности 19^3 (17 интерьер + apron по 1 с каждой стороны)
-                        var density = new NativeArray<short>(TransvoxelMesher.CacheVolume, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-                        
-                        for (int i = 0; i < VoxelConstants.CacheSize; i++)
-                        {
-                            for (int j = 0; j < VoxelConstants.CacheSize; j++)
-                            {
-                                for (int k = 0; k < VoxelConstants.CacheSize; k++)
-                                {
-                                    // Индексы кэша 1..17 маппятся в воксели чанка 0..16.
-                                    // Индексы 0 и 18 — apron (воксели -1 и 17).
-                                    int3 voxelCoord = chunkOriginVoxels + new int3(i - 1, j - 1, k - 1);
-                                    
-                                    // SDF сферы: distance_to_center - radius. 
-                                    // d <= 0 означает грунт, d > 0 — воздух.
-                                    float3 diff = new float3(voxelCoord.x, voxelCoord.y, voxelCoord.z) - sphereCenterVoxels;
-                                    float sdf = math.length(diff) - radiusVoxels;
-
-                                    int idx = (i * VoxelConstants.CacheSize + j) * VoxelConstants.CacheSize + k;
-                                    density[idx] = VoxelDensity.Quantize(sdf);
-                                }
-                            }
-                        }
-
-                        // 2. Меширование (Transvoxel)
-                        var meshOutput = TransvoxelMesher.Mesh(density, islandId, Allocator.Temp);
-                        density.Dispose();
-
-                        if (meshOutput.VertexCount == 0)
-                        {
-                            meshOutput.Dispose();
-                            continue;
-                        }
-
-                        // 3. Создание GameObject для чанка
-                        var chunkGo = new GameObject($"Chunk_{chunkCoord.x}_{chunkCoord.y}_{chunkCoord.z}");
-                        chunkGo.transform.SetParent(_chunksRoot.transform, false);
-                        // Позиция чанка в метрах относительно центра
-                        chunkGo.transform.localPosition = new Vector3(chunkOriginVoxels.x, chunkOriginVoxels.y, chunkOriginVoxels.z) * VOXEL_STEP;
-
-                        var mf = chunkGo.AddComponent<MeshFilter>();
-                        var mr = chunkGo.AddComponent<MeshRenderer>();
-                        
-                        if (MeshMaterial == null)
-                        {
-                            MeshMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit")); 
-                            if (MeshMaterial == null) MeshMaterial = new Material(Shader.Find("Standard"));
-                        }
-                        mr.material = MeshMaterial;
-
-                        var mesh = new Mesh();
-                        mesh.name = $"Mesh_{chunkCoord}";
-                        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-
-                        var vertices = new Vector3[meshOutput.VertexCount];
-                        var normals = new Vector3[meshOutput.VertexCount];
-                        var colors = new Color[meshOutput.VertexCount];
-                        
-                        for (int v = 0; v < meshOutput.VertexCount; v++)
-                        {
-                            // Позиции вершин локальны относительно чанка (в шагах сетки)
-                            float3 p = meshOutput.Positions[v];
-                            vertices[v] = new Vector3(p.x, p.y, p.z) * VOXEL_STEP;
-                            
-                            float3 n = meshOutput.Normals[v];
-                            // n = math.normalizesafe(vertices[v] + chunkGo.transform.localPosition);
-                            normals[v] = new Vector3(n.x, n.y, n.z);
-                            
-                            if (UseVertexColors)
-                            {
-                                colors[v] = GetMaterialDebugColor((VoxelMaterial)meshOutput.Materials[v]);
-                            }
-                        }
-
-                        var triangles = new int[meshOutput.Indices.Length];
-                        for (int i = 0; i < meshOutput.Indices.Length; i++)
-                        {
-                            // Winding уже согласован с нормалями (наружу) после
-                            // фикса P4a в TransvoxelMesher.MeshInto — инверсия не нужна.
-                            triangles[i] = (int)meshOutput.Indices[i];
-                        }
-
-                        mesh.vertices = vertices;
-                        mesh.normals = normals;
-                        mesh.triangles = triangles;
-                        
-                        if (UseVertexColors)
-                        {
-                            mesh.colors = colors;
-                        }
-                        
-                        mf.mesh = mesh;
-                        meshOutput.Dispose();
-                    }
-                }
+                geometry.Reset();
+                VoxelChunkMesher.BuildChunk(sphereField, nullMat, req, ref geometry, densityScratch, nodeMatScratch);
+                if (geometry.VertexCount == 0)
+                    continue;
+                BuildChunkGo(req);
             }
+
+            requests.Dispose();
         }
 
-        private Color GetMaterialDebugColor(VoxelMaterial mat)
+        void BuildChunkGo(in VoxelChunkRequest req)
         {
-            switch (mat)
+            int cellVox = 1 << req.Lod;
+            int vCount = geometry.VertexCount;
+
+            var vertices = new Vector3[vCount];
+            var normals = new Vector3[vCount];
+            var colors = new Color[vCount];
+
+            for (int v = 0; v < vCount; v++)
             {
-                case VoxelMaterial.Dirt:   return new Color(0.55f, 0.27f, 0.07f); 
-                case VoxelMaterial.Coal:   return new Color(0.1f, 0.1f, 0.1f);    
-                case VoxelMaterial.Sand:   return new Color(0.93f, 0.84f, 0.56f); 
-                case VoxelMaterial.Quartz: return new Color(0.9f, 0.9f, 1.0f);    
-                default:                   return Color.magenta; // VoxelMaterial.None
+                float3 p = geometry.Positions[v];
+                vertices[v] = (req.Origin0 + p * cellVox) * VoxelStep;
+                float3 n = geometry.Normals[v];
+                normals[v] = new Vector3(n.x, n.y, n.z);
+                colors[v] = UseVertexColors ? Color.magenta : Color.white;
             }
+
+            var triangles = new int[geometry.Indices.Length];
+            for (int i = 0; i < triangles.Length; i++)
+                triangles[i] = (int)geometry.Indices[i];
+
+            var go = new GameObject($"Chunk_L{req.Lod}_{req.ChunkCoord.x}_{req.ChunkCoord.y}_{req.ChunkCoord.z}");
+            go.transform.SetParent(_chunksRoot.transform, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            if (MeshMaterial == null)
+            {
+                MeshMaterial = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+                if (MeshMaterial == null) MeshMaterial = new Material(Shader.Find("Standard"));
+            }
+            mr.sharedMaterial = MeshMaterial;
+
+            var mesh = new Mesh { name = go.name, indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+            mesh.vertices = vertices;
+            mesh.normals = normals;
+            if (UseVertexColors) mesh.colors = colors;
+            mesh.triangles = triangles;
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
         }
 
+        [ContextMenu("Clear")]
         public void Clear()
         {
             if (_chunksRoot != null)
             {
-                if (Application.isPlaying)
-                    Destroy(_chunksRoot);
-                else
-                    DestroyImmediate(_chunksRoot);
+                if (Application.isPlaying) Destroy(_chunksRoot);
+                else DestroyImmediate(_chunksRoot);
                 _chunksRoot = null;
             }
         }
 
-        private void OnDestroy()
+        void OnDestroy()
         {
             Clear();
+            if (densityScratch.IsCreated) densityScratch.Dispose();
+            if (nodeMatScratch.IsCreated) nodeMatScratch.Dispose();
+            geometry.Dispose();
         }
     }
 }

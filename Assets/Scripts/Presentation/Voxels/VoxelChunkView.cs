@@ -3,22 +3,20 @@ using Unity.Mathematics;
 using Unity.Collections;
 using SmilemanStudio.Core;
 using SmilemanStudio.Core.Voxels;
-using SmilemanStudio.Simulation.Voxels;
 
 namespace SmilemanStudio.Presentation.Voxels
 {
     /// <summary>
-    /// Показывает один воксельный чанк острова как UnityEngine.Mesh (P4a, первый видимый результат).
+    /// Показывает один воксельный чанк острова как UnityEngine.Mesh (ADR-0002, D7).
     /// </summary>
     /// <remarks>
-    /// Мост Simulation -> Presentation: берёт кэш плотности (<see cref="VoxelChunkSampler"/>),
-    /// меширует regular cells (<see cref="TransvoxelMesher"/>, главный поток — для одного чанка
-    /// этого достаточно, Burst-джоба <see cref="MeshVoxelChunkJob"/> подключится в P5 для
-    /// пакетной сборки) и отдаёт меш в <see cref="MeshFilter"/>.
+    /// Мост к автономному воксельному движку: остров задаётся только как источник
+    /// плотности/материала (<see cref="IslandDensityField"/> + <see cref="IslandMaterialAdapter"/>)
+    /// и заявка чанка (<see cref="VoxelChunkRequest"/>). Меширование — целиком
+    /// <see cref="VoxelChunkMesher"/>: он заполняет буферы, строит regular (+ transition при
+    /// SeamFaceMask) и отдаёт единую геометрию. View ничего не знает о SDF и материале.
     ///
-    /// Материал — vertex-color: берётся встроенный unlit "Sprites/Default" (читает COLOR,
-    /// Cull Off, не требует URP-ассетов) — гарантирует видимость без кастомного шейдера.
-    /// Освещение на нём не работает; lit-шейдер с vertex color — задача P5.
+    /// Материал — vertex-color: встроенный unlit "Sprites/Default" (читает COLOR, Cull Off).
     /// </remarks>
     [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
     public class VoxelChunkView : MonoBehaviour
@@ -33,8 +31,11 @@ namespace SmilemanStudio.Presentation.Voxels
         public int ChunkY;
         public int ChunkZ;
 
-        [Tooltip("Уровень LOD (P4a: только 0).")]
+        [Tooltip("Уровень LOD (0 по умолчанию).")]
         public int Lod = 0;
+
+        [Tooltip("Seam-маска transition-граней (0 — обычный чанк без LOD-шва).")]
+        public int SeamFaceMask = 0;
 
         [Tooltip("Мировая позиция начала координат острова.")]
         public Vector3 IslandWorldOrigin = Vector3.zero;
@@ -49,10 +50,7 @@ namespace SmilemanStudio.Presentation.Voxels
             EnsureVertexColorMaterial();
         }
 
-        void Start()
-        {
-            Build();
-        }
+        void Start() => Build();
 
         /// <summary>Пересобрать меш текущего чанка из процедурного острова.</summary>
         public void Build()
@@ -61,15 +59,31 @@ namespace SmilemanStudio.Presentation.Voxels
             if (_renderer == null) _renderer = GetComponent<MeshRenderer>();
             EnsureVertexColorMaterial();
 
-            long chunkKey = VoxelChunkCoord.Pack(ChunkX, ChunkY, ChunkZ, Lod);
             var islandId = new IslandId(IslandValue);
+            var densityField = new IslandDensityField(islandId, Radius);
+            var materialField = new IslandMaterialAdapter(islandId);
 
-            using var density = VoxelChunkSampler.Sample(chunkKey, islandId, Radius, Allocator.Persistent);
-            var output = TransvoxelMesher.Mesh(density, islandId, Allocator.Persistent);
+            var coord = new int3(ChunkX, ChunkY, ChunkZ);
+            var req = new VoxelChunkRequest
+            {
+                ChunkCoord = coord,
+                Lod = (byte)Lod,
+                Origin0 = VoxelFieldSampler.ChunkOrigin0(coord, Lod),
+                SeamFaceMask = SeamFaceMask,
+            };
 
-            int3 origin0 = VoxelChunkSampler.ChunkOrigin0(chunkKey);
-            Mesh mesh = VoxelChunkMeshBuilder.Build(in output, origin0, IslandWorldOrigin);
-            output.Dispose();
+            var geometry = new VoxelChunkGeometry();
+            geometry.Allocate(Allocator.Persistent);
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+
+            VoxelChunkMesher.BuildChunk(densityField, materialField, req, ref geometry, density, nodeMat);
+
+            Mesh mesh = VoxelChunkMeshBuilder.Build(geometry, req.Origin0, Lod, IslandWorldOrigin);
+
+            density.Dispose();
+            nodeMat.Dispose();
+            geometry.Dispose();
 
             Mesh previous = _filter.sharedMesh;
             _filter.sharedMesh = mesh;

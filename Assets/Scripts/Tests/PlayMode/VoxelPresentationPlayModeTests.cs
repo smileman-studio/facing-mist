@@ -33,13 +33,30 @@ namespace SmilemanStudio.Tests.PlayMode
         public void MeshBuilder_BuildsValidMeshFromRealIslandChunk()
         {
             long key = FindSurfaceChunkKey();
-            int3 origin0 = VoxelChunkSampler.ChunkOrigin0(key);
+            int3 origin0 = VoxelFieldSampler.ChunkOrigin0(key);
+            int lod = VoxelChunkCoord.UnpackLod(key);
 
-            var density = VoxelChunkSampler.Sample(key, new IslandId(IslandValue), Radius, Allocator.Temp);
-            var output = TransvoxelMesher.Mesh(density, new IslandId(IslandValue), Allocator.Temp);
+            var densityField = new IslandDensityField(new IslandId(IslandValue), Radius);
+            var materialField = new IslandMaterialAdapter(new IslandId(IslandValue));
+            var req = new VoxelChunkRequest
+            {
+                ChunkCoord = new int3(
+                    VoxelChunkCoord.UnpackX(key), VoxelChunkCoord.UnpackY(key), VoxelChunkCoord.UnpackZ(key)),
+                Lod = (byte)lod,
+                Origin0 = origin0,
+                SeamFaceMask = 0,
+            };
+
+            var geometry = new VoxelChunkGeometry();
+            geometry.Allocate(Allocator.Persistent);
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+
+            VoxelChunkMesher.BuildChunk(densityField, materialField, req, ref geometry, density, nodeMat);
+
             try
             {
-                Mesh mesh = VoxelChunkMeshBuilder.Build(in output, origin0, Vector3.zero);
+                Mesh mesh = VoxelChunkMeshBuilder.Build(geometry, origin0, lod, Vector3.zero);
 
                 Assert.IsNotNull(mesh);
                 Assert.Greater(mesh.vertexCount, 0, "mesh must have vertices");
@@ -65,8 +82,9 @@ namespace SmilemanStudio.Tests.PlayMode
             }
             finally
             {
-                output.Dispose();
                 density.Dispose();
+                nodeMat.Dispose();
+                geometry.Dispose();
             }
         }
 

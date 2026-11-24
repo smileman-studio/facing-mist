@@ -1,28 +1,25 @@
 ﻿using SmilemanStudio.Core;
+using SmilemanStudio.Core.Voxels;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
+using Unity.Mathematics;
 
 namespace SmilemanStudio.Simulation.Voxels
 {
     /// <summary>
-    /// Заполнение кэша плотности одного чанка (P3.4, ADR-0002 D3/D4).
+    /// Заполнение кэша плотности и материала узлов одного чанка острова (ADR-0002 D3/D4).
     /// </summary>
     /// <remarks>
-    /// Тонкая обёртка над <see cref="VoxelChunkSampler.SampleCore"/>: вся математика
-    /// живёт в Core-примитивах, Burst здесь нужен только чтобы вынести 19³ сэмплов
-    /// с главного потока. Джоба не аллоцирует и не читает состояние мира — это чистая
-    /// функция от <see cref="ChunkKey"/>, <see cref="IslandId"/> и <see cref="Radius"/>,
-    /// поэтому одинаковый вход даёт побитно одинаковый буфер на любой платформе.
-    ///
-    /// <see cref="Density"/> обязан быть длиной
-    /// <see cref="VoxelChunkSampler.CacheVolume"/>: контракт проверяется снаружи,
-    /// внутри Burst <c>throw</c> недоступен.
+    /// Джоба вызывает generic-сэмплер движка <see cref="VoxelFieldSampler"/> с островным
+    /// полем <see cref="IslandDensityField"/> / <see cref="IslandMaterialAdapter"/>. Чистая
+    /// функция от <see cref="ChunkKey"/>, <see cref="IslandId"/> и <see cref="Radius"/>.
+    /// Побитово совпадает со старым путём через VoxelChunkSampler (golden-hash мешей не меняется).
     /// </remarks>
     [BurstCompile]
     public struct SampleVoxelChunkJob : IJob
     {
-        /// <summary>Ключ чанка (<see cref="SmilemanStudio.Core.Voxels.VoxelChunkCoord.Pack"/>).</summary>
+        /// <summary>Ключ чанка (<see cref="VoxelChunkCoord.Pack"/>).</summary>
         public long ChunkKey;
 
         /// <summary>Идентификатор острова.</summary>
@@ -34,9 +31,18 @@ namespace SmilemanStudio.Simulation.Voxels
         /// <summary>Выходной буфер плотности: 19³ <c>short</c>, XYZ-мажорный порядок.</summary>
         public NativeArray<short> Density;
 
+        /// <summary>Выходной буфер материала узлов: 17³ <c>byte</c>, XYZ-мажорный порядок.</summary>
+        public NativeArray<byte> NodeMaterial;
+
         public void Execute()
         {
-            VoxelChunkSampler.SampleCore(ChunkKey, IslandId, Radius, Density);
+            int3 origin0 = VoxelFieldSampler.ChunkOrigin0(ChunkKey);
+            int lod = VoxelChunkCoord.UnpackLod(ChunkKey);
+            var densityField = new IslandDensityField(IslandId, Radius);
+            var materialField = new IslandMaterialAdapter(IslandId);
+
+            VoxelFieldSampler.FillDensity(origin0, lod, densityField, Density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, materialField, NodeMaterial);
         }
     }
 }
