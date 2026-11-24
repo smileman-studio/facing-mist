@@ -321,10 +321,10 @@ namespace SmilemanStudio.Tests.EditMode
             var tg = new NativeList<int3>(64, Allocator.Persistent);
             var tm = new NativeList<byte>(64, Allocator.Persistent);
             var ti = new NativeList<uint>(96, Allocator.Persistent);
-            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, tp, tg, tm,
-                ti);
+            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, tp, tg, tm, ti);
 
             // Fine-сосед lod0 на -X: его XMax-грань = наша XMin-плоскость.
+            // Он покрывает только ЧЕТВЕРТЬ грани: world y,z ∈ [0,16].
             int3 originG = origin0 - new int3(16, 0, 0);
             var dG = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
             var nG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
@@ -336,39 +336,97 @@ namespace SmilemanStudio.Tests.EditMode
             float maxGap = 0f;
             for (int i = 0; i < tp.Length; i++)
             {
-                if (math.abs(tp[i].x) > 1e-3f) continue; // только w=0 (на плоскости шва)
-                float3 world = origin0 + tp[i] * 2f; // coarse-ячейки lod1 → воксели
+                if (math.abs(tp[i].x) > 1e-3f) continue; // только w=0 — на плоскости шва
+                // Четверть грани, покрытая этим fine-соседом: coarse y,z ∈ [0,8].
+                if (tp[i].y < 0.5f || tp[i].y > 7.5f || tp[i].z < 0.5f || tp[i].z > 7.5f) continue;
+                float3 world = origin0 + tp[i] * 2f; // coarse-ячейки lod1 → воксели LOD0
                 float best = float.MaxValue;
                 for (int j = 0; j < fine.VertexCount; j++)
                 {
                     if (math.abs(fine.Positions[j].x - 16f) > 1e-3f) continue; // fine XMax-грань
-                    float3 wf = originG + fine.Positions[j];
-                    best = math.min(best, math.distance(world, wf));
+                    best = math.min(best, math.distance(world, originG + fine.Positions[j]));
                 }
-
-                if (best < 1e-2f)
-                {
-                    matched++;
-                    maxGap = math.max(maxGap, best);
-                }
-                else Assert.Fail($"transition seam vertex {world} не имеет пары fine (gap={best})");
+                if (best < 1e-2f) { matched++; maxGap = math.max(maxGap, best); }
+                else Assert.Fail($"seam vertex {world} без пары fine (gap={best})");
             }
-
             Assert.Greater(matched, 0, "шов обязан пересекаться поверхностью");
-            // допуск: квант Q16 (2^-16 coarse-ячейки * 2 вокселя) + float
             Assert.Less(maxGap, 4e-4f, $"max seam gap = {maxGap}");
 
-            tp.Dispose();
-            tg.Dispose();
-            tm.Dispose();
-            ti.Dispose();
-            density.Dispose();
-            nodeMat.Dispose();
-            dG.Dispose();
-            nG.Dispose();
-            fine.Dispose();
-            face.Density.Dispose();
-            face.Material.Dispose();
+            tp.Dispose(); tg.Dispose(); tm.Dispose(); ti.Dispose();
+            density.Dispose(); nodeMat.Dispose(); dG.Dispose(); nG.Dispose(); fine.Dispose();
+            face.Density.Dispose(); face.Material.Dispose();
+        }
+        
+                [Test]
+        public void Seam_AllDirections_TransitionBoundary_MatchesFine()
+        {
+            const int lod = 1;
+            var sphere = new SphereDensityField(new int3(16, 16, 16), 20);
+            var mat = new NullMaterialField();
+            int3 origin0 = int3.zero;
+            float Comp(float3 v, int a) => a == 0 ? v.x : a == 1 ? v.y : v.z;
+
+            var dirs = new[]
+            {
+                (TransitionDirection.XMin, 0, new int3(-16, 0, 0)),
+                (TransitionDirection.XMax, 0, new int3(32, 0, 0)),
+                (TransitionDirection.YMin, 1, new int3(0, -16, 0)),
+                (TransitionDirection.YMax, 1, new int3(0, 32, 0)),
+                (TransitionDirection.ZMin, 2, new int3(0, 0, -16)),
+                (TransitionDirection.ZMax, 2, new int3(0, 0, 32)),
+            };
+
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
+
+            foreach (var (dir, axis, off) in dirs)
+            {
+                bool min = dir == TransitionDirection.XMin || dir == TransitionDirection.YMin || dir == TransitionDirection.ZMin;
+                float ourFace = min ? 0f : 16f;
+                float fineFace = min ? 16f : 0f;
+
+                var face = default(TransitionFaceSamples);
+                VoxelFieldSampler.FillFace(origin0, lod, dir, sphere, mat, ref face);
+                var tp = new NativeList<float3>(64, Allocator.Persistent);
+                var tg = new NativeList<int3>(64, Allocator.Persistent);
+                var tm = new NativeList<byte>(64, Allocator.Persistent);
+                var ti = new NativeList<uint>(96, Allocator.Persistent);
+                TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, dir, tp, tg, tm, ti);
+
+                int3 originG = origin0 + off;
+                var dG = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+                var nG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+                VoxelFieldSampler.FillDensity(originG, 0, sphere, dG);
+                VoxelFieldSampler.FillNodeMaterial(originG, 0, mat, nG);
+                var fine = TransvoxelMesher.Mesh(dG, nG, Allocator.Persistent);
+
+                int matched = 0; float maxGap = 0f;
+                for (int i = 0; i < tp.Length; i++)
+                {
+                    if (math.abs(Comp(tp[i], axis) - ourFace) > 1e-3f) continue;
+                    int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
+                    if (Comp(tp[i], a1) < 0.5f || Comp(tp[i], a1) > 7.5f ||
+                        Comp(tp[i], a2) < 0.5f || Comp(tp[i], a2) > 7.5f) continue;
+                    float3 world = origin0 + tp[i] * 2f;
+                    float best = float.MaxValue;
+                    for (int j = 0; j < fine.VertexCount; j++)
+                    {
+                        if (math.abs(Comp(fine.Positions[j], axis) - fineFace) > 1e-3f) continue;
+                        best = math.min(best, math.distance(world, originG + fine.Positions[j]));
+                    }
+                    if (best < 1e-2f) { matched++; maxGap = math.max(maxGap, best); }
+                    else Assert.Fail($"{dir}: seam vertex {world} без пары fine (gap={best})");
+                }
+                Assert.Greater(matched, 0, $"{dir}: шов обязан пересекаться поверхностью");
+                Assert.Less(maxGap, 4e-4f, $"{dir}: max seam gap = {maxGap}");
+
+                tp.Dispose(); tg.Dispose(); tm.Dispose(); ti.Dispose();
+                dG.Dispose(); nG.Dispose(); fine.Dispose();
+                face.Density.Dispose(); face.Material.Dispose();
+            }
+            density.Dispose(); nodeMat.Dispose();
         }
     }
 }
