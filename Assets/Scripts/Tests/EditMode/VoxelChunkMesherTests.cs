@@ -110,7 +110,8 @@ namespace SmilemanStudio.Tests.EditMode
             int3 origin0 = VoxelFieldSampler.ChunkOrigin0(coord, 1);
 
             var noSeam = new VoxelChunkRequest { ChunkCoord = coord, Lod = 1, Origin0 = origin0, SeamFaceMask = 0 };
-            var withSeam = new VoxelChunkRequest { ChunkCoord = coord, Lod = 1, Origin0 = origin0, SeamFaceMask = TransvoxelMesher.SkipXMax };
+            var withSeam = new VoxelChunkRequest
+                { ChunkCoord = coord, Lod = 1, Origin0 = origin0, SeamFaceMask = TransvoxelMesher.SkipXMax };
 
             using var geoNo = BuildChunk(sphere, mat, noSeam);
             using var geoYes = BuildChunk(sphere, mat, withSeam);
@@ -192,7 +193,8 @@ namespace SmilemanStudio.Tests.EditMode
             VoxelFieldSampler.FillNodeMaterial(origin0, lod, mField, nodeMat);
             var legacy = TransvoxelMesher.Mesh(density, nodeMat, Allocator.Persistent);
 
-            var req = new VoxelChunkRequest { ChunkCoord = coord, Lod = (byte)lod, Origin0 = origin0, SeamFaceMask = 0 };
+            var req = new VoxelChunkRequest
+                { ChunkCoord = coord, Lod = (byte)lod, Origin0 = origin0, SeamFaceMask = 0 };
             var geo = new VoxelChunkGeometry();
             geo.Allocate(Allocator.Persistent);
             var dScratch = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
@@ -202,9 +204,12 @@ namespace SmilemanStudio.Tests.EditMode
             Assert.AreEqual(legacy.VertexCount, geo.VertexCount, "regular-геометрия движка == legacy");
             Assert.AreEqual(legacy.Indices.Length, geo.Indices.Length);
 
-            dScratch.Dispose(); nScratch.Dispose(); geo.Dispose(); legacy.Dispose();
+            dScratch.Dispose();
+            nScratch.Dispose();
+            geo.Dispose();
+            legacy.Dispose();
         }
-        
+
         [Test]
         public void TransitionStrip_LiesOnSeamFace_NotShrunkToMinCorner()
         {
@@ -226,10 +231,144 @@ namespace SmilemanStudio.Tests.EditMode
             foreach (var p in geo.Positions)
             {
                 // Regular не может дать x > 15 (слой x=15 пропущен) — всё, что на x=16, это transition.
-                if (p.x > 15.999f) { onFace = true; maxOnFaceY = math.max(maxOnFaceY, p.y); }
+                if (p.x > 15.999f)
+                {
+                    onFace = true;
+                    maxOnFaceY = math.max(maxOnFaceY, p.y);
+                }
             }
+
             Assert.IsTrue(onFace, "полоса обязана лежать на грани x=16, а не x=8 (двойной /2)");
             Assert.Greater(maxOnFaceY, 12f, "полоса не сжата к min-углу: на грани сфера достигает y≈16");
+        }
+
+        static void TransitionFaceGeometry(TransitionDirection dir, int3 sphereCenterVox,
+            out NativeList<float3> pos, out NativeList<int3> grad, out NativeList<uint> idx)
+        {
+            var sphere = new SphereDensityField(sphereCenterVox, 20);
+            var mat = new NullMaterialField();
+            int3 origin0 = int3.zero;
+            const int lod = 1;
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
+            var face = default(TransitionFaceSamples);
+            VoxelFieldSampler.FillFace(origin0, lod, dir, sphere, mat, ref face);
+            pos = new NativeList<float3>(64, Allocator.Persistent);
+            grad = new NativeList<int3>(64, Allocator.Persistent);
+            var m = new NativeList<byte>(64, Allocator.Persistent);
+            idx = new NativeList<uint>(96, Allocator.Persistent);
+            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, dir, pos, grad, m, idx);
+            m.Dispose();
+            density.Dispose();
+            nodeMat.Dispose();
+            face.Density.Dispose();
+            face.Material.Dispose();
+        }
+
+        [Test]
+        public void TransitionStrip_DepthInward_AndWindingOutward_XMin()
+        {
+            // Центр сферы на грани XMin (world x=0): полоса обязана уходить ВНУТРЬ чанка (x>0).
+            TransitionFaceGeometry(TransitionDirection.XMin, new int3(0, 16, 16),
+                out var pos, out var grad, out var idx);
+            Assert.Greater(pos.Length, 0);
+
+            bool hasInterior = false;
+            for (int i = 0; i < pos.Length; i++)
+            {
+                Assert.GreaterOrEqual(pos[i].x, -1e-3f, "XMin: interior ушёл наружу (зеркало глубины)");
+                if (pos[i].x > 0.5f) hasInterior = true;
+            }
+
+            Assert.IsTrue(hasInterior, "полоса обязана иметь глубину внутрь чанка");
+
+            int checkedTris = 0;
+            for (int t = 0; t < idx.Length; t += 3)
+            {
+                float3 p0 = pos[(int)idx[t]], p1 = pos[(int)idx[t + 1]], p2 = pos[(int)idx[t + 2]];
+                float3 cross = math.cross(p1 - p0, p2 - p0);
+                if (math.lengthsq(cross) < 1e-10f) continue;
+                float3 n = TransvoxelMesher.NormalizeGradient(grad[(int)idx[t]]
+                                                              + grad[(int)idx[t + 1]] + grad[(int)idx[t + 2]]);
+                Assert.Greater(math.dot(math.normalize(cross), n), 0.5f,
+                    $"tri {t / 3}: winding transition перевёрнут относительно нормали");
+                checkedTris++;
+            }
+
+            Assert.Greater(checkedTris, 0);
+            pos.Dispose();
+            grad.Dispose();
+            idx.Dispose();
+        }
+
+        [Test]
+        public void Seam_TransitionBoundary_MatchesFineNeighbor_WorldSpace()
+        {
+            const int lod = 1;
+            var sphere = new SphereDensityField(new int3(0, 16, 16), 20); // центр на XMin-грани
+            var mat = new NullMaterialField();
+            int3 origin0 = int3.zero;
+
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
+            var face = default(TransitionFaceSamples);
+            VoxelFieldSampler.FillFace(origin0, lod, TransitionDirection.XMin, sphere, mat, ref face);
+            var tp = new NativeList<float3>(64, Allocator.Persistent);
+            var tg = new NativeList<int3>(64, Allocator.Persistent);
+            var tm = new NativeList<byte>(64, Allocator.Persistent);
+            var ti = new NativeList<uint>(96, Allocator.Persistent);
+            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, tp, tg, tm,
+                ti);
+
+            // Fine-сосед lod0 на -X: его XMax-грань = наша XMin-плоскость.
+            int3 originG = origin0 - new int3(16, 0, 0);
+            var dG = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(originG, 0, sphere, dG);
+            VoxelFieldSampler.FillNodeMaterial(originG, 0, mat, nG);
+            var fine = TransvoxelMesher.Mesh(dG, nG, Allocator.Persistent);
+
+            int matched = 0;
+            float maxGap = 0f;
+            for (int i = 0; i < tp.Length; i++)
+            {
+                if (math.abs(tp[i].x) > 1e-3f) continue; // только w=0 (на плоскости шва)
+                float3 world = origin0 + tp[i] * 2f; // coarse-ячейки lod1 → воксели
+                float best = float.MaxValue;
+                for (int j = 0; j < fine.VertexCount; j++)
+                {
+                    if (math.abs(fine.Positions[j].x - 16f) > 1e-3f) continue; // fine XMax-грань
+                    float3 wf = originG + fine.Positions[j];
+                    best = math.min(best, math.distance(world, wf));
+                }
+
+                if (best < 1e-2f)
+                {
+                    matched++;
+                    maxGap = math.max(maxGap, best);
+                }
+                else Assert.Fail($"transition seam vertex {world} не имеет пары fine (gap={best})");
+            }
+
+            Assert.Greater(matched, 0, "шов обязан пересекаться поверхностью");
+            // допуск: квант Q16 (2^-16 coarse-ячейки * 2 вокселя) + float
+            Assert.Less(maxGap, 4e-4f, $"max seam gap = {maxGap}");
+
+            tp.Dispose();
+            tg.Dispose();
+            tm.Dispose();
+            ti.Dispose();
+            density.Dispose();
+            nodeMat.Dispose();
+            dG.Dispose();
+            nG.Dispose();
+            fine.Dispose();
+            face.Density.Dispose();
+            face.Material.Dispose();
         }
     }
 }

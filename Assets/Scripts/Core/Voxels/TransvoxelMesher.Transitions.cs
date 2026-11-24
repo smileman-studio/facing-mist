@@ -438,25 +438,27 @@ namespace SmilemanStudio.Core.Voxels
 
                         vertexIndices[i] = vertexIndex;
                     }
-
-                    // 10. Треугольники; flip winding по старшему биту класса.
+                    
+                    // 10. Треугольники. Transition-таблицы хранят базовый обход НАРУЖУ
+                    // (в отличие от regular — там внутрь), поэтому !flipWinding → прямой порядок,
+                    // flipWinding (complement) → реверс. Инверсия обеих веток = полоса наизнанку.
                     int triVertCount = triCount * 3;
                     if (!flipWinding)
                     {
                         for (int i = 0; i < triVertCount; i += 3)
                         {
-                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 2]]);
-                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 1]]);
                             indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 0]]);
+                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 1]]);
+                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 2]]);
                         }
                     }
                     else
                     {
                         for (int i = 0; i < triVertCount; i += 3)
                         {
-                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 0]]);
-                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 1]]);
                             indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 2]]);
+                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 1]]);
+                            indices.Add((uint)vertexIndices[TransvoxelTransitionTables.TransitionCellTriangleIndices[triBase + i + 0]]);
                         }
                     }
                 }
