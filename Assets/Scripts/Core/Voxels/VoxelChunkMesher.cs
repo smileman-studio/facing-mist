@@ -18,14 +18,8 @@ namespace SmilemanStudio.Core.Voxels
     ///   2. <see cref="TransvoxelMesher.MeshInto"/> меширует regular cells с faceMask из
     ///      <see cref="VoxelChunkRequest.SeamFaceMask"/> (приграничный слой пропускается там,
     ///      где нужен шов).
-    ///   3. Для каждой seam-грани заполняется face-буфер и мешируются transition cells; их
-    ///      вершины переводятся из полуячеек (0..32) в coarse-ячейки (0..16) делением на 2,
-    ///      чтобы geometry была в ЕДИНОЙ системе координат с regular (Presentation множит
-    ///      всё на один cellVox).
-    ///
-    /// Исправленный баг (дыры на швах): старый VoxelDebugLodCascade масштабировал
-    /// transition-вершины тем же (1&lt;&lt;lod), что и regular, хотя мешер отдаёт их в
-    /// полуячейках. Шов уезжал вдвое дальше → щели между LOD. Здесь scale корректен.
+    ///   3. Для каждой seam-грани заполняется face-буфер и мешируются transition cells;
+    /// конвертация происходит внутри мешера, AppendTransitions не масштабирует;
     ///
     /// Все методы Burst-safe: generic-поля (struct + interface), никаких managed-аллокаций
     /// в ядре; scratch-буферы передаёт вызывающий (переиспользование между чанками).
@@ -99,10 +93,11 @@ namespace SmilemanStudio.Core.Voxels
 
                 int baseVertex = geometry.VertexCount;
 
-                // Перенос вершин: полуячейки (0..32) -> coarse-ячейки (0..16), /2.
+                // Перенос вершин: MeshTransitionInto уже отдаёт coarse-ячейки (0..16) —
+                // Q16-полуячейки × 2^-17 (D3). Дополнительный /2 сжимал полосу к min-углу чанка.
                 for (int v = 0; v < tPos.Length; v++)
                 {
-                    geometry.Positions.Add(tPos[v] * 0.5f);
+                    geometry.Positions.Add(tPos[v]);
                     geometry.Normals.Add(TransvoxelMesher.NormalizeGradient(tGrad[v]));
                     geometry.Materials.Add(tMat[v]);
                 }

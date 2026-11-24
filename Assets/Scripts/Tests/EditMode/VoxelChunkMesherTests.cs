@@ -204,5 +204,32 @@ namespace SmilemanStudio.Tests.EditMode
 
             dScratch.Dispose(); nScratch.Dispose(); geo.Dispose(); legacy.Dispose();
         }
+        
+        [Test]
+        public void TransitionStrip_LiesOnSeamFace_NotShrunkToMinCorner()
+        {
+            // Сфера с центром на XMax-грани (coarse x=16): поверхность трансверсально
+            // пересекает грань → transition-вершины обязаны лежать НА плоскости x=16.
+            var sphere = new SphereDensityField(new int3(32, 16, 16), 20);
+            var mat = new NullMaterialField();
+            int3 coord = int3.zero;
+            var req = new VoxelChunkRequest
+            {
+                ChunkCoord = coord, Lod = 1,
+                Origin0 = VoxelFieldSampler.ChunkOrigin0(coord, 1),
+                SeamFaceMask = TransvoxelMesher.SkipXMax,
+            };
+            using var geo = BuildChunk(sphere, mat, req);
+
+            bool onFace = false;
+            float maxOnFaceY = 0f;
+            foreach (var p in geo.Positions)
+            {
+                // Regular не может дать x > 15 (слой x=15 пропущен) — всё, что на x=16, это transition.
+                if (p.x > 15.999f) { onFace = true; maxOnFaceY = math.max(maxOnFaceY, p.y); }
+            }
+            Assert.IsTrue(onFace, "полоса обязана лежать на грани x=16, а не x=8 (двойной /2)");
+            Assert.Greater(maxOnFaceY, 12f, "полоса не сжата к min-углу: на грани сфера достигает y≈16");
+        }
     }
 }

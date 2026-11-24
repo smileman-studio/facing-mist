@@ -195,7 +195,7 @@ namespace SmilemanStudio.Core.Voxels
         /// Буфер сэмпов у грани: <see cref="TransitionFaceSamples"/>.
         /// </param>
         /// <param name="direction">Грань чанка, на которой строятся transition cells.</param>
-        /// <param name="positions">Выход: позиции в ячейках lod-1 (float, из Q16 * 2^-17).</param>
+        /// <param name="positions">Выход: в coarse-ячейках текущего lod (0..16), Q16-полуячейки × 2⁻¹⁷.</param>
         /// <param name="gradients">Выход: целочисленные градиенты (нормализует Presentation).</param>
         /// <param name="materials">Выход: материалы вершин (<see cref="VoxelMaterial"/> в byte).</param>
         /// <param name="indices">Выход: индексы треугольников (3 на треугольник).</param>
