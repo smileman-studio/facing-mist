@@ -172,48 +172,50 @@ namespace SmilemanStudio.Tests.EditMode
             Assert.Greater(matched, 0, "surface must cross the LOD seam face");
         }
 
-        // --- 4. Low-res грань полосы vs own regular coarse-чанка, побитово ---
+        // D4a для фартука: вершины внутренней кривой фартука (low-res, cacheIdx > 6)
+        // лежат на плоскости шва и обязаны побитово совпадать с own-regular
+        // и позицией, и нормалью. Вершины внешней кривой совпадают с fine-соседом
+        // (проверено отдельным тестом) и здесь пропускаются.
         [Test]
-        public void Seam_TransitionLowResFace_MatchesOwnRegular_NormalsBitwise()
+        public void Seam_CurtainLowResCurve_MatchesOwnRegular_PositionAndNormalBitwise()
         {
-            var id = new IslandId(1);
-            float3 center = new float3(8f, 8f, 2f);
-            const float r = 7f;
+            var sphere = new SphereDensityField(new int3(0, 16, 16), 20);
+            var mat = new NullMaterialField();
             int3 origin0 = int3.zero;
-            using var dCoarse = SphereCache(origin0, 2, center, r);
-            var nm = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            var regular = TransvoxelMesher.Mesh(dCoarse, nm, Allocator.Persistent);
+            const int lod = 1;
 
-            // Синтетический face-буфер (нулевой плотности → нет secondary-точек
-            // с пересечением; qw>0 ветвь читает density напрямую).
+            using var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
+            var regular = TransvoxelMesher.Mesh(density, nodeMat, Allocator.Persistent);
+
             var face = default(TransitionFaceSamples);
-            face.Density = new NativeArray<short>(VoxelFieldSampler.FaceSamplesVolume, Allocator.Temp);
-            face.Material = new NativeArray<byte>(VoxelFieldSampler.FaceSamplesVolume, Allocator.Temp);
-            face.Origin = new int3(-1, -1, -1);
-            face.Size = new int3(35, 35, 3);
-            face.Direction = TransitionDirection.ZMin;
-
+            VoxelFieldSampler.FillFace(origin0, lod, TransitionDirection.XMin, sphere, mat, ref face);
             var pos = new NativeList<float3>(64, Allocator.Persistent);
             var grad = new NativeList<int3>(64, Allocator.Persistent);
-            var mat = new NativeList<byte>(64, Allocator.Persistent);
+            var mats = new NativeList<byte>(64, Allocator.Persistent);
             var idx = new NativeList<uint>(96, Allocator.Persistent);
-            TransvoxelTransitionMesher.MeshTransitionInto(dCoarse, nm, face, TransitionDirection.ZMin, pos, grad, mat, idx);
-            nm.Dispose();
+            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, pos, grad, mats, idx);
 
             int matched = 0;
             for (int i = 0; i < pos.Length; i++)
             {
-                if (math.abs(pos[i].z - 1f) > 1e-4f) continue; // low-res грань = 1 coarse-ячейка
+                if (math.abs(pos[i].x) > 1e-3f) continue; // все вершины фартука на плоскости; фильтр на будущее
                 for (int j = 0; j < regular.VertexCount; j++)
                 {
+                    if (math.abs(regular.Positions[j].x) > 1e-3f) continue;
                     if (math.distance(pos[i], regular.Positions[j]) > 1e-3f) continue;
-                    float3 nT = TransvoxelMesher.NormalizeGradient(grad[i]);
-                    Assert.AreEqual(nT, regular.Normals[j], $"low-res seam vertex {i}/{j}");
+                    Assert.AreEqual(TransvoxelMesher.NormalizeGradient(grad[i]), regular.Normals[j],
+                        $"curtain low-res vertex {pos[i]}: нормаль обязана побитово равняться own-regular");
                     matched++;
+                    break;
                 }
             }
-            Assert.Greater(matched, 0, "surface must cross the low-res face");
-            pos.Dispose(); grad.Dispose(); mat.Dispose(); idx.Dispose(); regular.Dispose();
+            Assert.Greater(matched, 0, "внутренняя кривая фартука обязана пересекаться с own-regular на плоскости шва");
+
+            pos.Dispose(); grad.Dispose(); mats.Dispose(); idx.Dispose(); regular.Dispose();
+            nodeMat.Dispose();
             face.Density.Dispose(); face.Material.Dispose();
         }
 

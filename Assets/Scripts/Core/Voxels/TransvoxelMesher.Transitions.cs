@@ -359,10 +359,14 @@ namespace SmilemanStudio.Core.Voxels
                             long qv = (long)(2 * y + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1]) * 65536
                                     + (long)(TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3 + 1]
                                            - TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1]) * t;
-                            long qw = 0; // фартук плоский: нормали всегда из face-буфера
+                            // Фартук плоский, но нормали двойные, как в эталоне: вершины
+                            // low-res стороны фартука (cacheIdx > 6) получают нормаль из
+                            // coarse-кэша (побитово = own-regular на плоскости шва),
+                            // остальные — из face-буфера (побитово = fine-сосед).
+                            bool lowResFace = cacheIdx > 6;
 
                             int3 gI;
-                            if (qw == 0)
+                            if (!lowResFace)
                             {
                                 int fnx = (int)(qu >> 16) - 2 * x;
                                 int fny = (int)(qv >> 16) - 2 * y;

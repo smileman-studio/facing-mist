@@ -69,7 +69,7 @@ namespace SmilemanStudio.Presentation
             int3 boundsMax = centerVox + radiusVox;
 
             // Позиция игрока: (radius * 1.1, 0, 0) метров → воксели LOD0.
-            int3 playerVox = new int3(radius * 11 / 5, 0, 0);
+            int3 playerVox = new int3(radius + 2, 0, 0);
 
             // lodMax = lodCount - 1.
             int lodMax = lodCount - 1;
@@ -132,7 +132,7 @@ namespace SmilemanStudio.Presentation
         private void OnDrawGizmos()
         {
             int radiusVox = radius * VoxelCoord.VoxelsPerMeter();
-            int3 playerVox = new int3(radius * 11 / 5, 0, 0);
+            int3 playerVox = new int3(radius * 2 - 100, 0, 0);
             int lodMax = lodCount - 1;
 
             for (int j = 0; j < lodCount; j++)
