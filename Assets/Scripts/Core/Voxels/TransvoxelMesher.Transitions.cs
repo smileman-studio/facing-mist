@@ -246,10 +246,13 @@ namespace SmilemanStudio.Core.Voxels
 
                     //    4 угла low-res грани (глубина 2 полуячейки = 1 coarse-ячейка) —
                     //    узлы кэша 19³ на глубине 1, как в эталоне transvoxel_core.
-                    cellValues[9]  = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x,     2 * y,     2) / 2 + 1);
-                    cellValues[10] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y,     2) / 2 + 1);
-                    cellValues[11] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x,     2 * y + 2, 2) / 2 + 1);
-                    cellValues[12] = TransvoxelMesher.GetDensity(density, FaceToLocalSpace(direction, 2 * x + 2, 2 * y + 2, 2) / 2 + 1);
+                    // Эталон transvoxel_core: low-res углы дублируют углы грани.
+                    // Полоса — плоский фартук на плоскости шва; low-res кривая задана
+                    // coarse-узлами НА ЭТОЙ ЖЕ плоскости.
+                    cellValues[9]  = cellValues[0];
+                    cellValues[10] = cellValues[2];
+                    cellValues[11] = cellValues[6];
+                    cellValues[12] = cellValues[8];
 
                     // 2. Case code: 9 бит, порядок обхода углов 0,1,2,5,8,7,6,3,4.
                     int caseCode = ((cellValues[0] < 0 ? 1 : 0)
@@ -331,11 +334,11 @@ namespace SmilemanStudio.Core.Voxels
                             int3 h0 = FaceToLocalSpace(direction,
                                 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3],
                                 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1],
-                                TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 2]);
+                                0);
                             int3 h1 = FaceToLocalSpace(direction,
                                 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3],
                                 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3 + 1],
-                                TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3 + 2]);
+                                0);
 
                             int t = TransvoxelMesher.EdgeT(d0, d1);
                             long qx = (long)h0.x * 65536 + (long)(h1.x - h0.x) * t;
@@ -356,9 +359,7 @@ namespace SmilemanStudio.Core.Voxels
                             long qv = (long)(2 * y + TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1]) * 65536
                                     + (long)(TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3 + 1]
                                            - TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 1]) * t;
-                            long qw = (long)TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 2] * 65536
-                                    + (long)(TransvoxelTransitionTables.TransitionCornerOffset[c1 * 3 + 2]
-                                           - TransvoxelTransitionTables.TransitionCornerOffset[c0 * 3 + 2]) * t;
+                            long qw = 0; // фартук плоский: нормали всегда из face-буфера
 
                             int3 gI;
                             if (qw == 0)

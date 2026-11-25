@@ -139,8 +139,7 @@ namespace SmilemanStudio.Presentation
             {
                 int chunkVox = 16 << j;
                 int half = chunkVox * VoxelLodPlanner.RegionHalfChunks;
-                int snapStep = j < lodMax ? chunkVox << 1 : chunkVox;
-                int3 center = VoxelLodPlanner.SnapToGrid(playerVox, snapStep);
+                int3 center = VoxelLodPlanner.CommonCenter(playerVox, lodMax);
 
                 Gizmos.color = j < LodPalette.Length
                     ? new Color(LodPalette[j].r, LodPalette[j].g, LodPalette[j].b, 0.9f)

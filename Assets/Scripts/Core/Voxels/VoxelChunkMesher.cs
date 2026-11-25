@@ -51,10 +51,11 @@ namespace SmilemanStudio.Core.Voxels
             VoxelFieldSampler.FillNodeMaterial(req.Origin0, lod, materialField, nodeMatScratch);
 
             // 1. Regular cells: пропуск seam-слоёв по faceMask планировщика.
+            // Эталон: regular меширует все слои; фартук шьёт кривые на плоскости шва.
             TransvoxelMesher.MeshInto(
                 densityScratch, nodeMatScratch,
                 geometry.Positions, geometry.Normals, geometry.Materials, geometry.Indices,
-                req.SeamFaceMask);
+                0);
 
             // 2. Transition cells на seam-гранях (только lod >= 1).
             if (lod >= 1 && req.SeamFaceMask != 0)

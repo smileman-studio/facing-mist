@@ -1,4 +1,5 @@
-﻿using NUnit.Framework;
+﻿using System.Collections.Generic;
+using NUnit.Framework;
 using SmilemanStudio.Core.Voxels;
 using Unity.Collections;
 using Unity.Mathematics;
@@ -174,6 +175,53 @@ namespace SmilemanStudio.Tests.EditMode
                 Assert.AreEqual(r.ChunkCoord.z, VoxelChunkCoord.UnpackZ(key));
                 Assert.AreEqual(r.Lod, VoxelChunkCoord.UnpackLod(key));
             }
+        }
+        
+        [Test]
+        public void Plan_SeamMask_MatchesActualFinerNeighbors()
+        {
+            int radiusVox = 400;
+            int3 boundsMin = -radiusVox, boundsMax = radiusVox;
+            int3 player = new int3(radiusVox * 11 / 10, 0, 0);
+            var requests = new NativeList<VoxelChunkRequest>(Allocator.Persistent);
+            VoxelLodPlanner.Plan(boundsMin, boundsMax, player, 5, requests);
+
+            // Множество присутствующих чанков (coord,lod).
+            var present = new HashSet<long>();
+            foreach (var r in requests)
+                present.Add(VoxelChunkCoord.Pack(r.ChunkCoord.x, r.ChunkCoord.y, r.ChunkCoord.z, r.Lod));
+
+            int[] dx = { -1, 1, 0, 0, 0, 0 };
+            int[] dy = { 0, 0, -1, 1, 0, 0 };
+            int[] dz = { 0, 0, 0, 0, -1, 1 };
+
+            foreach (var r in requests)
+            {
+                if (r.Lod < 1) continue;
+                for (int d = 0; d < 6; d++)
+                {
+                    int3 nb = r.ChunkCoord + new int3(dx[d], dy[d], dz[d]);
+                    int nSize = 16 << r.Lod;
+                    int3 nOrigin = nb * nSize;
+                    // Независимое воспроизведение правила: шов <=> сосед целиком внутри R_{lod-1}
+                    // И пересекает AABB фигуры.
+                    int3 center = VoxelLodPlanner.CommonCenter(player, 5);
+                    int half = (16 << (r.Lod - 1)) * VoxelLodPlanner.RegionHalfChunks;
+                    bool covered = nOrigin.x >= center.x - half && nOrigin.x + nSize <= center.x + half
+                                                                && nOrigin.y >= center.y - half && nOrigin.y + nSize <= center.y + half
+                                                                && nOrigin.z >= center.z - half && nOrigin.z + nSize <= center.z + half;
+                    bool aabb = nOrigin.x <= boundsMax.x && nOrigin.x + nSize > boundsMin.x
+                                                         && nOrigin.y <= boundsMax.y && nOrigin.y + nSize > boundsMin.y
+                                                         && nOrigin.z <= boundsMax.z && nOrigin.z + nSize > boundsMin.z;
+                    int bit = d == 0 ? TransvoxelMesher.SkipXMin : d == 1 ? TransvoxelMesher.SkipXMax
+                        : d == 2 ? TransvoxelMesher.SkipYMin : d == 3 ? TransvoxelMesher.SkipYMax
+                        : d == 4 ? TransvoxelMesher.SkipZMin : TransvoxelMesher.SkipZMax;
+                    bool seamSet = (r.SeamFaceMask & bit) != 0;
+                    Assert.AreEqual(covered && aabb, seamSet,
+                        $"lod{r.Lod} {r.ChunkCoord} dir{d}: seam={seamSet}, expected={covered && aabb}");
+                }
+            }
+            requests.Dispose();
         }
     }
 }
