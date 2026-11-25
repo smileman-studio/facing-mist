@@ -190,6 +190,9 @@ namespace SmilemanStudio.Core.Voxels
         /// </param>
         /// <param name="nodeMaterial">
         /// Материал узловой сетки чанка: 17^3 <c>byte</c>, XYZ-мажорный.
+        /// Плоский фартук материал из него не читает (берёт всё с плоскости шва
+        /// из <paramref name="face"/>); параметр сохранён ради единого контракта
+        /// буферов regular/transition.
         /// </param>
         /// <param name="face">
         /// Буфер сэмпов у грани: <see cref="TransitionFaceSamples"/>.
@@ -406,25 +409,15 @@ namespace SmilemanStudio.Core.Voxels
                                     (int)(cx & 0xFFFF), (int)(cy & 0xFFFF), (int)(cz & 0xFFFF));
                             }
 
-                            // 8. Материал (P5): единая chunk-local система координат.
-                            //    anchor w=0 → из face.Material; anchor w=2 → из nodeMaterial.
-                            int anchorW = TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 2];
-                            byte mat;
-                            if (anchorW == 0)
-                            {
-                                int aU = 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3];
-                                int aV = 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1];
-                                mat = face.GetMaterialFace(aU, aV, 0);
-                            }
-                            else
-                            {
-                                int3 hAnchor = FaceToLocalSpace(direction,
-                                    2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3],
-                                    2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1],
-                                    2);
-                                int3 coarse = hAnchor / 2;
-                                mat = nodeMaterial[(coarse.x * 17 + coarse.y) * 17 + coarse.z];
-                            }
+                            // 8. Материал (P5): фартук плоский, поэтому материал берётся
+                            //    С ПЛОСКОСТИ ШВА — в грани-локальных полуячейках опорного угла.
+                            //    Для low-res вершины это узел coarse-сетки на плоскости
+                            //    (побитово = own-regular), для fine-вершины — узел мелкой сетки
+                            //    (побитово = fine-сосед). Прежнее чтение на одну coarse-ячейку
+                            //    вглубь чанка давало цветовой шов по границе LOD.
+                            int aU = 2 * x + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3];
+                            int aV = 2 * y + TransvoxelTransitionTables.TransitionCornerOffset[anchor * 3 + 1];
+                            byte mat = face.GetMaterialFace(aU, aV, 0);
 
                             positions.Add(new float3((float)qx, (float)qy, (float)qz) * InvQ16HalfCell);
                             gradients.Add(gI);

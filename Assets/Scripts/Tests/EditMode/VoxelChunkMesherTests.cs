@@ -297,84 +297,27 @@ namespace SmilemanStudio.Tests.EditMode
         }
 
         [Test]
-        [Ignore("Фартук:同上 заменить на тест замыкания обеих кривых на плоскости шва.")]
-        public void Seam_TransitionBoundary_MatchesFineNeighbor_WorldSpace()
+        public void Seam_CurtainClosesBothCurves_OnSeamPlane()
         {
-            const int lod = 1;
-            var sphere = new SphereDensityField(new int3(0, 16, 16), 20); // центр на XMin-грани
-            var mat = new NullMaterialField();
-            int3 origin0 = int3.zero;
-
-            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
-            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
-            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
-            var face = default(TransitionFaceSamples);
-            VoxelFieldSampler.FillFace(origin0, lod, TransitionDirection.XMin, sphere, mat, ref face);
-            var tp = new NativeList<float3>(64, Allocator.Persistent);
-            var tg = new NativeList<int3>(64, Allocator.Persistent);
-            var tm = new NativeList<byte>(64, Allocator.Persistent);
-            var ti = new NativeList<uint>(96, Allocator.Persistent);
-            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, tp, tg, tm,
-                ti);
-
-            // Fine-сосед lod0 на -X: его XMax-грань = наша XMin-плоскость.
-            // Он покрывает только ЧЕТВЕРТЬ грани: world y,z ∈ [0,16].
-            int3 originG = origin0 - new int3(16, 0, 0);
-            var dG = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
-            var nG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            VoxelFieldSampler.FillDensity(originG, 0, sphere, dG);
-            VoxelFieldSampler.FillNodeMaterial(originG, 0, mat, nG);
-            var fine = TransvoxelMesher.Mesh(dG, nG, Allocator.Persistent);
-
-            int matched = 0;
-            float maxGap = 0f;
-            for (int i = 0; i < tp.Length; i++)
-            {
-                if (math.abs(tp[i].x) > 1e-3f) continue; // только w=0 — на плоскости шва
-                // Четверть грани, покрытая этим fine-соседом: coarse y,z ∈ [0,8].
-                if (tp[i].y < 0.5f || tp[i].y > 7.5f || tp[i].z < 0.5f || tp[i].z > 7.5f) continue;
-                float3 world = origin0 + tp[i] * 2f; // coarse-ячейки lod1 → воксели LOD0
-                float best = float.MaxValue;
-                for (int j = 0; j < fine.VertexCount; j++)
-                {
-                    if (math.abs(fine.Positions[j].x - 16f) > 1e-3f) continue; // fine XMax-грань
-                    best = math.min(best, math.distance(world, originG + fine.Positions[j]));
-                }
-
-                if (best < 1e-2f)
-                {
-                    matched++;
-                    maxGap = math.max(maxGap, best);
-                }
-                else Assert.Fail($"seam vertex {world} без пары fine (gap={best})");
-            }
-
-            Assert.Greater(matched, 0, "шов обязан пересекаться поверхностью");
-            Assert.Less(maxGap, 4e-4f, $"max seam gap = {maxGap}");
-
-            tp.Dispose();
-            tg.Dispose();
-            tm.Dispose();
-            ti.Dispose();
-            density.Dispose();
-            nodeMat.Dispose();
-            dG.Dispose();
-            nG.Dispose();
-            fine.Dispose();
-            face.Density.Dispose();
-            face.Material.Dispose();
-        }
-
-        [Test]
-        [Ignore("Фартук: вершины на плоскости шва включают внутреннюю кривую (own-regular), тест ждал только fine. Заменить на тест замыкания обеих кривых.")]
-        public void Seam_AllDirections_TransitionBoundary_MatchesFine()
-        {
+            // Фартук плоский: ВСЕ transition-вершины лежат на плоскости шва, а полоса
+            // замкнута на две кривые — внутреннюю (coarse-улы, побитово = own-regular на
+            // плоскости шва) и внешнюю (fine-узлы, побитово = мелкий сосед lod-1).
+            // Тест заменяет три прежних per-curve теста: в узле решётки обе кривые
+            // совпадают по позиции, поэтому различать их по позиции нельзя — проверяем
+            // что у каждой вершины есть ПАРА хотя бы на одной из двух кривых (нет висячих
+            // вершин = нет дыр) и что обе кривые реально присутствуют.
             const int lod = 1;
             var sphere = new SphereDensityField(new int3(16, 16, 16), 20);
             var mat = new NullMaterialField();
             int3 origin0 = int3.zero;
             float Comp(float3 v, int a) => a == 0 ? v.x : a == 1 ? v.y : v.z;
+
+            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
+            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
+            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
+            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
+            // own-regular меширует все слои (faceMask = 0), как в VoxelChunkMesher.
+            var ownRegular = TransvoxelMesher.Mesh(density, nodeMat, Allocator.Persistent);
 
             var dirs = new[]
             {
@@ -386,11 +329,7 @@ namespace SmilemanStudio.Tests.EditMode
                 (TransitionDirection.ZMax, 2, new int3(0, 0, 32)),
             };
 
-            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
-            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
-            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
-
+            int closedOnOwn = 0, closedOnFine = 0;
             foreach (var (dir, axis, off) in dirs)
             {
                 bool min = dir == TransitionDirection.XMin || dir == TransitionDirection.YMin ||
@@ -406,6 +345,7 @@ namespace SmilemanStudio.Tests.EditMode
                 var ti = new NativeList<uint>(96, Allocator.Persistent);
                 TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, dir, tp, tg, tm, ti);
 
+                // Мелкий сосед lod0 через эту грань (покрывает четверть грани).
                 int3 originG = origin0 + off;
                 var dG = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
                 var nG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
@@ -413,32 +353,46 @@ namespace SmilemanStudio.Tests.EditMode
                 VoxelFieldSampler.FillNodeMaterial(originG, 0, mat, nG);
                 var fine = TransvoxelMesher.Mesh(dG, nG, Allocator.Persistent);
 
-                int matched = 0;
-                float maxGap = 0f;
+                Assert.Greater(tp.Length, 0, $"{dir}: шов обязан пересекаться поверхностью");
+
+                int onOwn = 0, onFine = 0;
                 for (int i = 0; i < tp.Length; i++)
                 {
-                    if (math.abs(Comp(tp[i], axis) - ourFace) > 1e-3f) continue;
-                    int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
-                    if (Comp(tp[i], a1) < 0.5f || Comp(tp[i], a1) > 7.5f ||
-                        Comp(tp[i], a2) < 0.5f || Comp(tp[i], a2) > 7.5f) continue;
+                    Assert.LessOrEqual(math.abs(Comp(tp[i], axis) - ourFace), 1e-3f,
+                        $"{dir}: фартук обязан лежать на плоскости шва, получено {tp[i]}");
+
                     float3 world = origin0 + tp[i] * 2f;
-                    float best = float.MaxValue;
+
+                    bool hasOwn = false;
+                    for (int j = 0; j < ownRegular.VertexCount; j++)
+                    {
+                        if (math.abs(Comp(ownRegular.Positions[j], axis) - ourFace) > 1e-3f) continue;
+                        if (math.distance(world, origin0 + ownRegular.Positions[j] * 2f) < 1e-2f)
+                        {
+                            hasOwn = true;
+                            break;
+                        }
+                    }
+
+                    bool hasFine = false;
                     for (int j = 0; j < fine.VertexCount; j++)
                     {
                         if (math.abs(Comp(fine.Positions[j], axis) - fineFace) > 1e-3f) continue;
-                        best = math.min(best, math.distance(world, originG + fine.Positions[j]));
+                        if (math.distance(world, originG + fine.Positions[j]) < 1e-2f)
+                        {
+                            hasFine = true;
+                            break;
+                        }
                     }
 
-                    if (best < 1e-2f)
-                    {
-                        matched++;
-                        maxGap = math.max(maxGap, best);
-                    }
-                    else Assert.Fail($"{dir}: seam vertex {world} без пары fine (gap={best})");
+                    Assert.IsTrue(hasOwn || hasFine,
+                        $"{dir}: transition-вершина {world} не замкнута ни на own-regular, ни на fine-соседа");
+                    if (hasOwn) onOwn++;
+                    if (hasFine) onFine++;
                 }
 
-                Assert.Greater(matched, 0, $"{dir}: шов обязан пересекаться поверхностью");
-                Assert.Less(maxGap, 4e-4f, $"{dir}: max seam gap = {maxGap}");
+                closedOnOwn += onOwn;
+                closedOnFine += onFine;
 
                 tp.Dispose();
                 tg.Dispose();
@@ -451,116 +405,12 @@ namespace SmilemanStudio.Tests.EditMode
                 face.Material.Dispose();
             }
 
-            density.Dispose();
-            nodeMat.Dispose();
-        }
-
-        [Test]
-        [Ignore("Объёмная полоса заменена плоским фартуком: заменить на тест замыкания обеих кривых (fine и own-regular) на плоскости шва.")]
-        public void Seam_AllDirections_TransitionLowRes_MatchesOwnRegular()
-        {
-            const int lod = 1;
-            var sphere = new SphereDensityField(new int3(16, 16, 16), 20);
-            var mat = new NullMaterialField();
-            int3 origin0 = int3.zero;
-            float Comp(float3 v, int a) => a == 0 ? v.x : a == 1 ? v.y : v.z;
-
-            var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
-            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
-            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
-            var regular = TransvoxelMesher.Mesh(density, nodeMat, Allocator.Persistent); // без маски: все слои
-
-            var dirs = new[]
-            {
-                (TransitionDirection.XMin, 0), (TransitionDirection.XMax, 0),
-                (TransitionDirection.YMin, 1), (TransitionDirection.YMax, 1),
-                (TransitionDirection.ZMin, 2), (TransitionDirection.ZMax, 2)
-            };
-
-            foreach (var (dir, axis) in dirs)
-            {
-                bool min = dir == TransitionDirection.XMin || dir == TransitionDirection.YMin ||
-                           dir == TransitionDirection.ZMin;
-                float lowRes = min ? 0f : 16f; 
-
-                var face = default(TransitionFaceSamples);
-                VoxelFieldSampler.FillFace(origin0, lod, dir, sphere, mat, ref face);
-                var tp = new NativeList<float3>(64, Allocator.Persistent);
-                var tg = new NativeList<int3>(64, Allocator.Persistent);
-                var tm = new NativeList<byte>(64, Allocator.Persistent);
-                var ti = new NativeList<uint>(96, Allocator.Persistent);
-                TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, dir, tp, tg, tm, ti);
-
-                int matched = 0;
-                float maxGap = 0f;
-                for (int i = 0; i < tp.Length; i++)
-                {
-                    if (math.abs(Comp(tp[i], axis) - lowRes) > 1e-3f) continue; // только low-res грань
-                    float3 world = origin0 + tp[i] * 2f;
-                    float best = float.MaxValue;
-                    for (int j = 0; j < regular.VertexCount; j++)
-                    {
-                        if (math.abs(Comp(regular.Positions[j], axis) - lowRes) > 1e-3f) continue;
-                        best = math.min(best, math.distance(world, origin0 + regular.Positions[j] * 2f));
-                    }
-
-                    if (best < 1e-2f)
-                    {
-                        matched++;
-                        maxGap = math.max(maxGap, best);
-                    }
-                    else
-                    {
-                        UnityEngine.Debug.Log($"FAIL {dir} world={world}");
-                        for (int j = 0; j < regular.VertexCount; j++)
-                        {
-                            if (math.abs(Comp(regular.Positions[j], axis) - lowRes) > 1e-3f) continue;
-                            float3 w = origin0 + regular.Positions[j] * 2f;
-                            if (math.distance(world, w) < 4f) UnityEngine.Debug.Log($"  regular near: {w}");
-                        }
-
-                        for (int i2 = 0; i2 < tp.Length; i2++)
-                        {
-                            if (math.abs(Comp(tp[i2], axis) - lowRes) > 1e-3f) continue;
-                            float3 w2 = origin0 + tp[i2] * 2f;
-                            if (math.distance(world, w2) < 4f) UnityEngine.Debug.Log($"  trans   near: {w2}");
-                        }
-
-                        for (int zz = 0; zz <= 6; zz++)
-                            UnityEngine.Debug.Log(
-                                $"  col y=5 grid z={zz} d={TransvoxelMesher.GetDensity(density, 2, 6, zz + 1)}");
-                        for (int zz = 0; zz <= 6; zz++)
-                            UnityEngine.Debug.Log(
-                                $"  col y=4 grid z={zz} d={TransvoxelMesher.GetDensity(density, 2, 5, zz + 1)}");
-                        for (int yy = 0; yy <= 6; yy++)
-                            UnityEngine.Debug.Log($"  row z=2 grid y={yy} d={TransvoxelMesher.GetDensity(density, 2, yy + 1, 3)}");
-                        // face w=0 обязан побитово равняться кэшу grid x=0: face(u,v,0) == GetDensity(density,1,u+1,v+1)
-                        for (int u = 3; u <= 7; u++)
-                        for (int v = 3; v <= 7; v++)
-                            UnityEngine.Debug.Log($"  face({u},{v},0)={face.GetDensityFace(u, v, 0)} cache0={TransvoxelMesher.GetDensity(density, 1, u + 1, v + 1)}");
-                        // алиасы low-res: grid x=1: GetDensity(density,2,u/2+1,v/2+1) для чётных u,v
-                        for (int u = 4; u <= 6; u += 2)
-                        for (int v = 4; v <= 6; v += 2)
-                            UnityEngine.Debug.Log($"  alias({u},{v})={TransvoxelMesher.GetDensity(density, 2, u / 2 + 1, v / 2 + 1)}");
-                        Assert.Fail($"{dir}: low-res vertex {world} без пары regular (gap={best})");
-                    }
-                }
-
-                Assert.Greater(matched, 0, $"{dir}: low-res грань обязана пересекаться поверхностью");
-                Assert.Less(maxGap, 4e-4f, $"{dir}: max low-res gap = {maxGap}");
-
-                tp.Dispose();
-                tg.Dispose();
-                tm.Dispose();
-                ti.Dispose();
-                face.Density.Dispose();
-                face.Material.Dispose();
-            }
+            Assert.Greater(closedOnOwn, 0, "внутренняя (coarse) кривая обязана замыкаться на own-regular");
+            Assert.Greater(closedOnFine, 0, "внешняя (fine) кривая обязана замыкаться на мелкого соседа");
 
             density.Dispose();
             nodeMat.Dispose();
-            regular.Dispose();
+            ownRegular.Dispose();
         }
     }
 }

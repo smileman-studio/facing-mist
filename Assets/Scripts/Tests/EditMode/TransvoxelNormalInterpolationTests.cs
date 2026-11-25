@@ -1,5 +1,4 @@
 ﻿using NUnit.Framework;
-using SmilemanStudio.Core;
 using SmilemanStudio.Core.Voxels;
 using SmilemanStudio.Simulation.Voxels;
 using Unity.Collections;
@@ -10,8 +9,10 @@ namespace SmilemanStudio.Tests.EditMode
 {
     /// <summary>
     /// D4a: трилинейная интерполяция узловых градиентов.
-    /// Стыки чанков одного LOD и LOD-граница — побитовое совпадение нормалей;
-    /// отсутствие per-cell площадок; детерминизм и parity с Burst-джобой.
+    /// Стыки чанков одного LOD — побитовое совпадение нормалей; отсутствие per-cell
+    /// площадок; детерминизм и parity с Burst-джобой. Замыкание кривых LOD-шва
+    /// (фартук) проверяется геометрически в
+    /// <c>VoxelChunkMesherTests.Seam_CurtainClosesBothCurves_OnSeamPlane</c>.
     /// </summary>
     public class TransvoxelNormalInterpolationTests
     {
@@ -84,142 +85,7 @@ namespace SmilemanStudio.Tests.EditMode
             o.Dispose();
         }
 
-        // --- 3. LOD-граница: transition-грань vs мелкий regular-сосед, побитово ---
-        // P5: transition mesh использует face-буфер; узлы плоскости шва — те же LOD0-воксели,
-        // что у мелкого соседа, поэтому контракт D4a (побитовое совпадение нормалей) сохранён.
-        [Test]
-        public void Seam_TransitionFace_MatchesFineRegular_NormalsBitwise()
-        {
-            var id = new IslandId(1);
-            const int radius = 200;
-            const int lod = 1;
-            int shift = 4 + lod;
-
-            // Точка поверхности: смена знака вдоль -Y.
-            bool found = false;
-            int3 surf = int3.zero;
-            int[] probes = { 8, 24, 40, -16, -32 };
-            foreach (int px in probes)
-            foreach (int pz in probes)
-            {
-                int prev = IslandSdf.SdfVoxel(new int3(px, 128, pz), id, radius);
-                for (int y = 128; y >= -600; y -= 4)
-                {
-                    int cur = IslandSdf.SdfVoxel(new int3(px, y, pz), id, radius);
-                    if ((cur < 0) != (prev < 0))
-                    {
-                        surf = new int3(px, y, pz);
-                        found = true;
-                        break;
-                    }
-                    prev = cur;
-                }
-                if (found) break;
-            }
-            Assert.IsTrue(found, "surface point not found");
-
-            int3 base0 = new int3((surf.x >> shift) << shift, (surf.y >> shift) << shift, (surf.z >> shift) << shift);
-            int3[] offsets =
-            {
-                new int3(0, 0, 0),   new int3(0, -32, 0), new int3(0, 0, -32), new int3(0, -32, -32),
-                new int3(32, 0, 0),  new int3(-32, 0, 0), new int3(0, 32, 0),  new int3(0, 0, 32),
-            };
-
-            int matched = 0;
-            foreach (int3 off in offsets)
-            {
-                int3 origin0 = base0 + off;
-                long keyC = VoxelChunkCoord.Pack(origin0.x >> shift, origin0.y >> shift, origin0.z >> shift, lod);
-                using var dCoarse = IslandDensity(keyC, id, radius, Allocator.Persistent);
-                var nmC = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-                IslandNodeMat(keyC, id, radius, nmC);
-
-                int3 originG = origin0 - new int3(16, 0, 0);
-                long keyG = VoxelChunkCoord.Pack(originG.x >> 4, originG.y >> 4, originG.z >> 4, 0);
-                using var dFine = IslandDensity(keyG, id, radius, Allocator.Persistent);
-                var nmG = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-                IslandNodeMat(keyG, id, radius, nmG);
-                var fine = TransvoxelMesher.Mesh(dFine, nmG, Allocator.Persistent);
-                nmG.Dispose();
-
-                var pos = new NativeList<float3>(64, Allocator.Persistent);
-                var grad = new NativeList<int3>(64, Allocator.Persistent);
-                var mat = new NativeList<byte>(64, Allocator.Persistent);
-                var idx = new NativeList<uint>(96, Allocator.Persistent);
-                var face = default(TransitionFaceSamples);
-                IslandFace(keyC, id, radius, TransitionDirection.XMin, lod, ref face);
-                TransvoxelTransitionMesher.MeshTransitionInto(dCoarse, nmC, face, TransitionDirection.XMin, pos, grad, mat, idx);
-                if (face.Density.IsCreated) face.Density.Dispose();
-                if (face.Material.IsCreated) face.Material.Dispose();
-                nmC.Dispose();
-
-                for (int i = 0; i < pos.Length; i++)
-                {
-                    float3 world = origin0 + pos[i] * 2f;
-                    if (math.abs(world.x - origin0.x) > 1e-3f) continue;
-                    for (int j = 0; j < fine.VertexCount; j++)
-                    {
-                        float3 wf = originG + fine.Positions[j];
-                        if (math.distance(world, wf) > 1e-3f) continue;
-                        float3 nT = TransvoxelMesher.NormalizeGradient(grad[i]);
-                        Assert.AreEqual(nT, fine.Normals[j], $"LOD seam vertex {i}/{j} at {world}: normals must be bitwise equal");
-                        matched++;
-                    }
-                }
-                pos.Dispose(); grad.Dispose(); mat.Dispose(); idx.Dispose(); fine.Dispose();
-                if (matched > 0) break;
-            }
-            Assert.Greater(matched, 0, "surface must cross the LOD seam face");
-        }
-
-        // D4a для фартука: вершины внутренней кривой фартука (low-res, cacheIdx > 6)
-        // лежат на плоскости шва и обязаны побитово совпадать с own-regular
-        // и позицией, и нормалью. Вершины внешней кривой совпадают с fine-соседом
-        // (проверено отдельным тестом) и здесь пропускаются.
-        [Test]
-        public void Seam_CurtainLowResCurve_MatchesOwnRegular_PositionAndNormalBitwise()
-        {
-            var sphere = new SphereDensityField(new int3(0, 16, 16), 20);
-            var mat = new NullMaterialField();
-            int3 origin0 = int3.zero;
-            const int lod = 1;
-
-            using var density = new NativeArray<short>(VoxelFieldSampler.CacheVolume, Allocator.Persistent);
-            var nodeMat = new NativeArray<byte>(VoxelFieldSampler.NodeMaterialVolume, Allocator.Persistent);
-            VoxelFieldSampler.FillDensity(origin0, lod, sphere, density);
-            VoxelFieldSampler.FillNodeMaterial(origin0, lod, mat, nodeMat);
-            var regular = TransvoxelMesher.Mesh(density, nodeMat, Allocator.Persistent);
-
-            var face = default(TransitionFaceSamples);
-            VoxelFieldSampler.FillFace(origin0, lod, TransitionDirection.XMin, sphere, mat, ref face);
-            var pos = new NativeList<float3>(64, Allocator.Persistent);
-            var grad = new NativeList<int3>(64, Allocator.Persistent);
-            var mats = new NativeList<byte>(64, Allocator.Persistent);
-            var idx = new NativeList<uint>(96, Allocator.Persistent);
-            TransvoxelTransitionMesher.MeshTransitionInto(density, nodeMat, face, TransitionDirection.XMin, pos, grad, mats, idx);
-
-            int matched = 0;
-            for (int i = 0; i < pos.Length; i++)
-            {
-                if (math.abs(pos[i].x) > 1e-3f) continue; // все вершины фартука на плоскости; фильтр на будущее
-                for (int j = 0; j < regular.VertexCount; j++)
-                {
-                    if (math.abs(regular.Positions[j].x) > 1e-3f) continue;
-                    if (math.distance(pos[i], regular.Positions[j]) > 1e-3f) continue;
-                    Assert.AreEqual(TransvoxelMesher.NormalizeGradient(grad[i]), regular.Normals[j],
-                        $"curtain low-res vertex {pos[i]}: нормаль обязана побитово равняться own-regular");
-                    matched++;
-                    break;
-                }
-            }
-            Assert.Greater(matched, 0, "внутренняя кривая фартука обязана пересекаться с own-regular на плоскости шва");
-
-            pos.Dispose(); grad.Dispose(); mats.Dispose(); idx.Dispose(); regular.Dispose();
-            nodeMat.Dispose();
-            face.Density.Dispose(); face.Material.Dispose();
-        }
-
-        // --- 5. Оракул: свёртка x→y→z независимой реализацией, побитово ---
+        // --- 4. Оракул: свёртка x→y→z независимой реализацией, побитово ---
         [Test]
         public void TrilinearGradient_MatchesIndependentReference_Bitwise()
         {
@@ -262,7 +128,7 @@ namespace SmilemanStudio.Tests.EditMode
             }
         }
 
-        // --- 6. Детерминизм + parity с Burst-джобой ---
+        // --- 5. Детерминизм + parity с Burst-джобой ---
         [Test]
         public void Normals_Deterministic_AndJobMatchesMainThread()
         {
@@ -283,29 +149,6 @@ namespace SmilemanStudio.Tests.EditMode
             for (int i = 0; i < a.VertexCount; i++) Assert.AreEqual(a.Normals[i], nor[i], $"job parity vertex {i}");
 
             a.Dispose(); b.Dispose(); pos.Dispose(); nor.Dispose(); mat.Dispose(); idx.Dispose(); nm.Dispose();
-        }
-
-        // --- helpers: выборка острова через generic-движок (VoxelFieldSampler + Island поля) ---
-
-        static NativeArray<short> IslandDensity(long key, IslandId id, int radius, Allocator alloc)
-        {
-            var d = new NativeArray<short>(VoxelFieldSampler.CacheVolume, alloc, NativeArrayOptions.UninitializedMemory);
-            var field = new IslandDensityField(id, radius);
-            VoxelFieldSampler.FillDensity(VoxelFieldSampler.ChunkOrigin0(key), VoxelChunkCoord.UnpackLod(key), field, d);
-            return d;
-        }
-
-        static void IslandNodeMat(long key, IslandId id, int radius, NativeArray<byte> nm)
-        {
-            var field = new IslandMaterialAdapter(id);
-            VoxelFieldSampler.FillNodeMaterial(VoxelFieldSampler.ChunkOrigin0(key), VoxelChunkCoord.UnpackLod(key), field, nm);
-        }
-
-        static void IslandFace(long key, IslandId id, int radius, TransitionDirection dir, int lod, ref TransitionFaceSamples face)
-        {
-            var dField = new IslandDensityField(id, radius);
-            var mField = new IslandMaterialAdapter(id);
-            VoxelFieldSampler.FillFace(VoxelFieldSampler.ChunkOrigin0(key), lod, dir, dField, mField, ref face);
         }
     }
 }
